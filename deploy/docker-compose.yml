@@ -1,3 +1,13 @@
+# JMeter Center — Docker Compose
+#
+# Основной стек:
+#   docker compose up --build -d
+#
+# Агент (после создания Generator в UI/API и подстановки UUID):
+#   DEMO_GENERATOR_ID=<uuid> docker compose --profile agents up --build -d agent-1
+#
+# Локальные fixtures для Bitbucket-режима mode=local уже в ../fixtures
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -25,7 +35,7 @@ services:
       DB_NAME: ltplatform
       DB_USER: ltplatform
       DB_PASSWORD: ltplatform
-      LT_MASTER_KEY: 0123456789abcdef0123456789abcdef
+      LT_MASTER_KEY: ${LT_MASTER_KEY:-0123456789abcdef0123456789abcdef}
       LT_ARTIFACT_ROOT: /data/artifacts
       LT_LOG_ROOT: /data/logs
       LT_JMETER_BUNDLE: /data/jmeter
@@ -33,16 +43,22 @@ services:
       LT_CERTS_DIR: /data/certs
       LT_GRPC_PORT: 9090
       LT_CONTROLLER_HOST: controller
-      LT_ADMIN_PASSWORD: admin
+      LT_ADMIN_PASSWORD: ${LT_ADMIN_PASSWORD:-admin}
     ports:
       - "8080:8080"
       - "9090:9090"
     volumes:
       - controller-data:/data
-      - ./lt-agent:/data/agent/lt-agent:ro
+      - ../fixtures:/fixtures:ro
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -u admin:$${LT_ADMIN_PASSWORD:-admin} http://localhost:8080/actuator/health | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
 
   frontend:
     build:
@@ -51,25 +67,62 @@ services:
     ports:
       - "3000:80"
     depends_on:
-      - controller
+      controller:
+        condition: service_healthy
 
-  # Example agent container for local E2E (connects outbound to controller:9090)
-  agent-master:
+  # --- Агенты (profile: agents) ---------------------------------------------
+  # Перед запуском создайте Generator в UI/API и передайте его UUID:
+  #   DEMO_GENERATOR_ID=<uuid> docker compose --profile agents up -d --build agent-1
+  #
+  # Для второго генератора:
+  #   DEMO_GENERATOR_ID_2=<uuid> docker compose --profile agents up -d --build agent-2
+
+  agent-1:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.agent
     environment:
       LT_CONTROLLER: controller:9090
-      LT_GENERATOR_ID: ${DEMO_MASTER_GENERATOR_ID:-00000000-0000-0000-0000-000000000001}
-      LT_AGENT_ID: agent-master
-      LT_BOOTSTRAP_TOKEN: demo
+      LT_GENERATOR_ID: ${DEMO_GENERATOR_ID:?Set DEMO_GENERATOR_ID to the Generator UUID from the UI/API}
+      LT_AGENT_ID: ${LT_AGENT_ID:-agent-1}
+      LT_BOOTSTRAP_TOKEN: ${LT_BOOTSTRAP_TOKEN:-demo}
       LT_WORK_ROOT: /var/lib/lt-agent/workspaces
       LT_STATE_DIR: /var/lib/lt-agent/state
       LT_JMETER_HOME: /opt/lt-jmeter
+      LT_AGENT_VERSION: "0.1.0"
+    volumes:
+      - agent1-state:/var/lib/lt-agent
+      # Опционально: подключить реальный Apache JMeter вместо stub из образа
+      # - /opt/apache-jmeter-5.6:/opt/lt-jmeter:ro
     depends_on:
-      - controller
-    profiles: ["e2e"]
+      controller:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles: ["agents"]
+
+  agent-2:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.agent
+    environment:
+      LT_CONTROLLER: controller:9090
+      LT_GENERATOR_ID: ${DEMO_GENERATOR_ID_2:?Set DEMO_GENERATOR_ID_2 to the second Generator UUID}
+      LT_AGENT_ID: ${LT_AGENT_ID_2:-agent-2}
+      LT_BOOTSTRAP_TOKEN: ${LT_BOOTSTRAP_TOKEN:-demo}
+      LT_WORK_ROOT: /var/lib/lt-agent/workspaces
+      LT_STATE_DIR: /var/lib/lt-agent/state
+      LT_JMETER_HOME: /opt/lt-jmeter
+      LT_AGENT_VERSION: "0.1.0"
+    volumes:
+      - agent2-state:/var/lib/lt-agent
+    depends_on:
+      controller:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles: ["agents"]
 
 volumes:
   pgdata:
   controller-data:
+  agent1-state:
+  agent2-state:
