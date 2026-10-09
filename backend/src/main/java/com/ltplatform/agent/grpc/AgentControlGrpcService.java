@@ -15,12 +15,14 @@ import com.ltplatform.generator.domain.Generator;
 import com.ltplatform.generator.domain.GeneratorStatus;
 import com.ltplatform.generator.repo.AgentConnectionRepository;
 import com.ltplatform.generator.repo.GeneratorRepository;
+import com.ltplatform.generator.service.GeneratorLogService;
 import com.ltplatform.generator.service.GeneratorService;
 import com.ltplatform.generator.service.ReconnectReconcileService;
 import com.ltplatform.logging.service.LogStorageService;
 import com.ltplatform.security.crypto.CertificateAuthority;
 import io.grpc.stub.StreamObserver;
 import java.time.Instant;
+import java.util.Map;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,6 +39,7 @@ public class AgentControlGrpcService extends AgentControlGrpc.AgentControlImplBa
     private final ReconnectReconcileService reconcile;
     private final CertificateAuthority ca;
     private final LogStorageService logs;
+    private final GeneratorLogService genLogs;
 
     public AgentControlGrpcService(
             AgentSessionRegistry sessions,
@@ -45,7 +48,8 @@ public class AgentControlGrpcService extends AgentControlGrpc.AgentControlImplBa
             GeneratorService generatorService,
             ReconnectReconcileService reconcile,
             CertificateAuthority ca,
-            LogStorageService logs
+            LogStorageService logs,
+            GeneratorLogService genLogs
     ) {
         this.sessions = sessions;
         this.generators = generators;
@@ -54,6 +58,7 @@ public class AgentControlGrpcService extends AgentControlGrpc.AgentControlImplBa
         this.reconcile = reconcile;
         this.ca = ca;
         this.logs = logs;
+        this.genLogs = genLogs;
     }
 
     @Override
@@ -77,14 +82,30 @@ public class AgentControlGrpcService extends AgentControlGrpc.AgentControlImplBa
                     }
                 } catch (Exception e) {
                     log.error("Error handling agent message: {}", e.getMessage(), e);
+                    if (generatorId != null) {
+                        genLogs.error(generatorId, "AGENT_CONN", "HANDLER_ERROR", e.getMessage());
+                    }
                 }
             }
 
             private void handleRegister(RegisterRequest req, StreamObserver<ControllerMessage> out) {
                 agentId = req.getAgentId();
-                UUID genId = UUID.fromString(req.getGeneratorId());
+                UUID genId;
+                try {
+                    genId = UUID.fromString(req.getGeneratorId());
+                } catch (Exception e) {
+                    out.onNext(ControllerMessage.newBuilder()
+                            .setRegisterResponse(RegisterResponse.newBuilder()
+                                    .setAccepted(false)
+                                    .setMessage("Invalid generatorId")
+                                    .build())
+                            .build());
+                    return;
+                }
                 Generator generator = generators.findById(genId).orElse(null);
                 if (generator == null) {
+                    genLogs.error(genId, "AGENT_CONN", "REGISTER_REJECTED",
+                            "Unknown generatorId=" + genId + " agentId=" + agentId);
                     out.onNext(ControllerMessage.newBuilder()
                             .setRegisterResponse(RegisterResponse.newBuilder()
                                     .setAccepted(false)
@@ -109,6 +130,7 @@ public class AgentControlGrpcService extends AgentControlGrpc.AgentControlImplBa
                 connections.save(conn);
 
                 sessions.register(genId, agentId, sessionId, out);
+                String prevStatus = generator.getStatus().name();
                 generator.setAgentVersion(req.getAgentVersion());
                 generator.setJavaVersion(req.getJavaVersion());
                 generator.setJmeterVersion(req.getJmeterVersion());
@@ -133,6 +155,20 @@ public class AgentControlGrpcService extends AgentControlGrpc.AgentControlImplBa
                                 .setFencingToken(generator.getFencingToken())
                                 .build())
                         .build());
+                genLogs.append(genId, "AGENT_CONN", "INFO", "REGISTERED",
+                        "Agent registered: agentId=" + agentId
+                                + " session=" + sessionId.substring(0, 8)
+                                + " status " + prevStatus + "→" + generator.getStatus()
+                                + " java=" + req.getJavaVersion()
+                                + " jmeter=" + req.getJmeterVersion(),
+                        Map.of(
+                                "agentId", agentId,
+                                "sessionId", sessionId,
+                                "agentVersion", req.getAgentVersion(),
+                                "javaVersion", req.getJavaVersion(),
+                                "jmeterVersion", req.getJmeterVersion(),
+                                "fencingToken", generator.getFencingToken()
+                        ));
                 log.info("Agent {} registered for generator {}", agentId, genId);
             }
 
@@ -152,12 +188,29 @@ public class AgentControlGrpcService extends AgentControlGrpc.AgentControlImplBa
                 );
                 generators.findById(generatorId).ifPresent(g -> {
                     if (g.getStatus() == GeneratorStatus.OFFLINE) {
+                        genLogs.info(generatorId, "AGENT_CONN", "RECONNECT",
+                                "Heartbeat from previously OFFLINE agent — reconciling");
                         reconcile.reconcile(generatorId);
                     }
                 });
             }
 
             private void handleResult(CommandResult result) {
+                // AgentCommandService already logs outcomes via await; keep a raw ingress trace for debugging
+                if (generatorId != null) {
+                    genLogs.append(generatorId, "AGENT_CMD", result.getSuccess() ? "INFO" : "ERROR",
+                            "RAW_RESULT",
+                            "Agent reply commandId=" + (result.getCommandId().length() > 8
+                                    ? result.getCommandId().substring(0, 8) : result.getCommandId())
+                                    + (result.getSuccess() ? " OK" : " FAIL")
+                                    + (result.getMessage().isBlank() ? "" : ": " + result.getMessage()),
+                            Map.of(
+                                    "commandId", result.getCommandId(),
+                                    "runId", result.getRunId(),
+                                    "success", result.getSuccess(),
+                                    "attributes", result.getAttributesMap()
+                            ));
+                }
                 sessions.complete(result.getCommandId(), new CommandOutcome(
                         result.getSuccess(),
                         result.getMessage(),
@@ -178,6 +231,10 @@ public class AgentControlGrpcService extends AgentControlGrpc.AgentControlImplBa
             @Override
             public void onError(Throwable t) {
                 log.warn("Agent session error generator={} agent={}: {}", generatorId, agentId, t.getMessage());
+                if (generatorId != null) {
+                    genLogs.warn(generatorId, "AGENT_CONN", "SESSION_ERROR",
+                            "gRPC session error: " + t.getMessage());
+                }
                 if (generatorId != null && sessionId != null) {
                     sessions.unregister(generatorId, sessionId);
                 }
@@ -185,6 +242,10 @@ public class AgentControlGrpcService extends AgentControlGrpc.AgentControlImplBa
 
             @Override
             public void onCompleted() {
+                if (generatorId != null) {
+                    genLogs.info(generatorId, "AGENT_CONN", "SESSION_CLOSED",
+                            "Agent closed gRPC session" + (agentId != null ? " agentId=" + agentId : ""));
+                }
                 if (generatorId != null && sessionId != null) {
                     sessions.unregister(generatorId, sessionId);
                 }
