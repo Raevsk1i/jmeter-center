@@ -51,18 +51,41 @@ func Collect(jmeterHome string) Metrics {
                 }
         }
         if out, err := exec.Command("java", "-version").CombinedOutput(); err == nil {
-                m.JavaVer = firstLine(string(out))
+                m.JavaVer = clip(preferLine(string(out), "version"), 500)
         }
         jmeter := jmeterHome + "/bin/jmeter"
         if out, err := exec.Command(jmeter, "-v").CombinedOutput(); err == nil {
-                m.JMeterVer = firstLine(string(out))
+                // jmeter -v often prints ASCII art first; prefer a line with "JMeter" / "Version"
+                m.JMeterVer = clip(preferLine(string(out), "JMeter", "Version", "version"), 500)
         }
         return m
 }
 
-func firstLine(s string) string {
-        if i := strings.IndexByte(s, '\n'); i >= 0 {
-                return strings.TrimSpace(s[:i])
+func preferLine(s string, needles ...string) string {
+        lines := strings.Split(s, "\n")
+        for _, line := range lines {
+                trimmed := strings.TrimSpace(line)
+                if trimmed == "" {
+                        continue
+                }
+                for _, n := range needles {
+                        if strings.Contains(trimmed, n) {
+                                return trimmed
+                        }
+                }
+        }
+        for _, line := range lines {
+                if trimmed := strings.TrimSpace(line); trimmed != "" {
+                        return trimmed
+                }
         }
         return strings.TrimSpace(s)
+}
+
+func clip(s string, max int) string {
+        s = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(s, "\r", " "), "\n", " "))
+        if len(s) <= max {
+                return s
+        }
+        return s[:max]
 }

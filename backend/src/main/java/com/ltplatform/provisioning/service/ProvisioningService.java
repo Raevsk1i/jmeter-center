@@ -232,6 +232,15 @@ public class ProvisioningService {
                                 + "). See generator diagnostic logs / journalctl.");
             }
 
+            // Ensure DB status matches success (registration may have raced with our in-memory entity).
+            Generator finalized = generators.findById(generatorId).orElse(g);
+            finalized.setStatus(GeneratorStatus.AVAILABLE);
+            finalized.setProvisionStep("READY");
+            finalized.setProvisionError(null);
+            finalized.touch();
+            generators.save(finalized);
+            g = finalized;
+
             runStep(g, "VERIFY", "Agent registered; generator AVAILABLE");
             genLogs.info(generatorId, "PROVISION", "VERIFY",
                     "Provisioning complete — agent connected and generator is AVAILABLE");
@@ -310,16 +319,17 @@ public class ProvisioningService {
         int attempt = 0;
         while (System.currentTimeMillis() < deadline) {
             attempt++;
-            if (sessions.isOnline(generatorId)) {
-                genLogs.info(generatorId, "PROVISION", "REGISTER_WAIT",
-                        "Agent session online after " + attempt + " poll(s)");
-                return true;
-            }
+            // Require persisted AVAILABLE — an in-memory session alone can appear if DB save failed.
             Generator refreshed = generators.findById(generatorId).orElse(null);
-            if (refreshed != null && refreshed.getStatus() == GeneratorStatus.AVAILABLE
-                    && refreshed.getLastHeartbeatAt() != null) {
+            boolean available = refreshed != null
+                    && refreshed.getStatus() == GeneratorStatus.AVAILABLE
+                    && refreshed.getLastHeartbeatAt() != null;
+            boolean sessionOnline = sessions.isOnline(generatorId);
+            if (available) {
                 genLogs.info(generatorId, "PROVISION", "REGISTER_WAIT",
-                        "Generator status AVAILABLE with heartbeat");
+                        "Generator AVAILABLE"
+                                + (sessionOnline ? " with live session" : " (heartbeat persisted)")
+                                + " after " + attempt + " poll(s)");
                 return true;
             }
             if (attempt == 1 || attempt % 5 == 0) {
@@ -327,7 +337,9 @@ public class ProvisioningService {
                         "sudo systemctl is-active lt-agent; sudo journalctl -u lt-agent -n 15 --no-pager || true",
                         20);
                 genLogs.append(generatorId, "PROVISION", "INFO", "REGISTER_WAIT_POLL",
-                        "Still waiting for gRPC register (poll #" + attempt + ")",
+                        "Still waiting for gRPC register (poll #" + attempt + ")"
+                                + " sessionOnline=" + sessionOnline
+                                + " status=" + (refreshed != null ? refreshed.getStatus() : "missing"),
                         Map.of(
                                 "systemd", truncate(status.stdout(), 1500),
                                 "stderr", truncate(status.stderr(), 500)

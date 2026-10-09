@@ -45,6 +45,13 @@ export function GeneratorsPage() {
     refetchInterval: createdId ? 2000 : false,
   });
 
+  const { data: createdGen } = useQuery({
+    queryKey: ['generator', createdId],
+    queryFn: () => api.get<Generator>(`/api/v1/generators/${createdId}`),
+    enabled: !!createdId,
+    refetchInterval: createdId ? 2000 : false,
+  });
+
   const openWizard = () => {
     setWizardOpen(true);
     setStep(0);
@@ -222,11 +229,27 @@ export function GeneratorsPage() {
           )}
           {step === 2 && (
             <Stack spacing={1}>
-              <Typography>Provisioning generator {createdId?.slice(0, 8)}…</Typography>
+              {createdGen?.status === 'AVAILABLE' ? (
+                <Alert severity="success">
+                  Generator is AVAILABLE — agent connected. Provisioning finished.
+                </Alert>
+              ) : createdGen?.status === 'ERROR' ? (
+                <Alert severity="error">
+                  Provisioning failed{createdGen.provisionError ? `: ${createdGen.provisionError}` : ''}.
+                  Open diagnostic logs for details.
+                </Alert>
+              ) : (
+                <>
+                  <Typography>
+                    Provisioning generator {createdId?.slice(0, 8)}…
+                    {createdGen?.provisionStep ? ` (${createdGen.provisionStep})` : ''}
+                  </Typography>
+                  <LinearProgress />
+                </>
+              )}
               {steps.map((s) => (
                 <Chip key={s.stepName + s.message} label={`${s.stepName}: ${s.status}`} sx={{ justifyContent: 'flex-start' }} />
               ))}
-              {steps.length === 0 && <LinearProgress />}
               {createdId && (
                 <Button
                   component={RouterLink}
