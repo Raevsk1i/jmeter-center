@@ -47,6 +47,7 @@ export type Generator = {
   sshPort: number;
   sshUser: string;
   status: string;
+  sshCredentialId?: string;
   agentVersion?: string;
   javaVersion?: string;
   jmeterVersion?: string;
@@ -57,6 +58,13 @@ export type Generator = {
   lastHeartbeatAt?: string;
   provisionStep?: string;
   provisionError?: string;
+};
+
+export type SshCredential = {
+  id: string;
+  name: string;
+  createdAt: string;
+  inUseCount: number;
 };
 
 export type TestRun = {

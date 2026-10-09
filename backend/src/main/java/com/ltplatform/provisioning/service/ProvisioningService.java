@@ -13,6 +13,7 @@ import com.ltplatform.generator.service.GeneratorLogService;
 import com.ltplatform.provisioning.ssh.SshAgentTunnelService;
 import com.ltplatform.provisioning.ssh.SshClientFactory;
 import com.ltplatform.settings.service.SettingsService;
+import java.io.IOException;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
@@ -25,6 +26,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 import net.schmizz.sshj.SSHClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -127,24 +130,7 @@ public class ProvisioningService {
             Path bundle = Path.of(props.getJmeterBundlePath());
             execLogged(client, generatorId, "INSTALL_JMETER",
                     "sudo mkdir -p /opt/lt-jmeter && sudo chown $(whoami) /opt/lt-jmeter || true", 30);
-            if (Files.isRegularFile(bundle)) {
-                genLogs.info(generatorId, "PROVISION", "INSTALL_JMETER",
-                        "Uploading JMeter archive from " + bundle);
-                byte[] bytes = Files.readAllBytes(bundle);
-                ssh.upload(client, bytes, "/tmp/jmeter-bundle.tgz");
-                execLogged(client, generatorId, "INSTALL_JMETER",
-                        "tar -xzf /tmp/jmeter-bundle.tgz -C /opt/lt-jmeter --strip-components=1 || true", 120);
-            } else if (Files.isDirectory(bundle)) {
-                genLogs.info(generatorId, "PROVISION", "INSTALL_JMETER",
-                        "JMeter bundle is a directory at " + bundle + "; uploading recursive marker");
-                execLogged(client, generatorId, "INSTALL_JMETER",
-                        "mkdir -p /opt/lt-jmeter && echo 'bundle-dir' > /opt/lt-jmeter/.installed", 30);
-            } else {
-                genLogs.warn(generatorId, "PROVISION", "INSTALL_JMETER",
-                        "JMeter bundle not found at " + bundle + "; writing pending marker");
-                execLogged(client, generatorId, "INSTALL_JMETER",
-                        "mkdir -p /opt/lt-jmeter && echo 'pending' > /opt/lt-jmeter/.installed", 30);
-            }
+            installJmeterBundle(client, generatorId, bundle);
 
             runStep(g, "CREATE_DIRS", "Creating agent directories");
             execLogged(client, generatorId, "CREATE_DIRS", """
@@ -438,6 +424,83 @@ public class ProvisioningService {
             );
             genLogs.error(id, "PROVISION", "FAILED", message);
         });
+    }
+
+    private void installJmeterBundle(SSHClient client, UUID generatorId, Path bundle) throws Exception {
+        if (Files.isRegularFile(bundle)) {
+            genLogs.info(generatorId, "PROVISION", "INSTALL_JMETER",
+                    "Uploading JMeter archive from " + bundle + " (" + Files.size(bundle) + " bytes)");
+            ssh.upload(client, Files.readAllBytes(bundle), "/tmp/jmeter-bundle.tgz");
+            execLogged(client, generatorId, "INSTALL_JMETER",
+                    "rm -rf /opt/lt-jmeter/* /opt/lt-jmeter/.[!.]* 2>/dev/null; "
+                            + "tar -xzf /tmp/jmeter-bundle.tgz -C /opt/lt-jmeter --strip-components=1 "
+                            + "&& rm -f /tmp/jmeter-bundle.tgz "
+                            + "&& test -x /opt/lt-jmeter/bin/jmeter "
+                            + "&& /opt/lt-jmeter/bin/jmeter -v 2>&1 | head -2", 180);
+            return;
+        }
+        if (Files.isDirectory(bundle)) {
+            Path binDir = bundle.resolve("bin");
+            boolean hasBin = Files.isDirectory(binDir);
+            boolean hasJmeter = Files.isRegularFile(bundle.resolve("bin/jmeter"))
+                    || Files.isRegularFile(bundle.resolve("bin/jmeter.bat"));
+            long fileCount;
+            try (Stream<Path> walk = Files.walk(bundle)) {
+                fileCount = walk.filter(Files::isRegularFile).count();
+            }
+            if (!hasBin || fileCount == 0) {
+                genLogs.warn(generatorId, "PROVISION", "INSTALL_JMETER",
+                        "JMeter directory " + bundle + " is empty or missing bin/; writing pending marker");
+                execLogged(client, generatorId, "INSTALL_JMETER",
+                        "mkdir -p /opt/lt-jmeter && echo 'pending' > /opt/lt-jmeter/.installed", 30);
+                return;
+            }
+            Path archive = Files.createTempFile("jmeter-bundle-", ".tgz");
+            try {
+                packDirectoryToTgz(bundle, archive);
+                long size = Files.size(archive);
+                genLogs.info(generatorId, "PROVISION", "INSTALL_JMETER",
+                        "Packing directory " + bundle + " (" + fileCount + " files) → upload "
+                                + size + " bytes"
+                                + (hasJmeter ? "" : " (bin/jmeter not found; extracting anyway)"));
+                ssh.upload(client, Files.readAllBytes(archive), "/tmp/jmeter-bundle.tgz");
+                var extract = execLogged(client, generatorId, "INSTALL_JMETER",
+                        "rm -rf /opt/lt-jmeter/* /opt/lt-jmeter/.[!.]* 2>/dev/null; "
+                                + "tar -xzf /tmp/jmeter-bundle.tgz -C /opt/lt-jmeter "
+                                + "&& rm -f /tmp/jmeter-bundle.tgz "
+                                + "&& chmod +x /opt/lt-jmeter/bin/jmeter /opt/lt-jmeter/bin/jmeter-server 2>/dev/null || true "
+                                + "&& ls /opt/lt-jmeter/bin | head -20 "
+                                + "&& (test -x /opt/lt-jmeter/bin/jmeter && /opt/lt-jmeter/bin/jmeter -v 2>&1 | head -2 || echo 'jmeter binary missing after extract')",
+                        300);
+                if (!extract.ok()) {
+                    throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
+                            "Failed to extract JMeter on generator: " + truncate(extract.stderr(), 500));
+                }
+            } finally {
+                Files.deleteIfExists(archive);
+            }
+            return;
+        }
+        genLogs.warn(generatorId, "PROVISION", "INSTALL_JMETER",
+                "JMeter bundle not found at " + bundle + "; writing pending marker");
+        execLogged(client, generatorId, "INSTALL_JMETER",
+                "mkdir -p /opt/lt-jmeter && echo 'pending' > /opt/lt-jmeter/.installed", 30);
+    }
+
+    /** Pack directory contents (not the root folder name) into a gzipped tar via system tar. */
+    public static void packDirectoryToTgz(Path directory, Path archive) throws IOException, InterruptedException {
+        ProcessBuilder pb = new ProcessBuilder(
+                "tar", "-czf", archive.toAbsolutePath().toString(),
+                "-C", directory.toAbsolutePath().toString(),
+                "."
+        );
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        String out = new String(p.getInputStream().readAllBytes());
+        if (!p.waitFor(10, TimeUnit.MINUTES) || p.exitValue() != 0) {
+            p.destroyForcibly();
+            throw new IOException("tar pack failed for " + directory + ": " + out);
+        }
     }
 
     private static String truncate(String s, int max) {

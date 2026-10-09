@@ -5,6 +5,7 @@ import com.ltplatform.generator.dto.GeneratorDtos.CreateGeneratorRequest;
 import com.ltplatform.generator.dto.GeneratorDtos.CredentialResponse;
 import com.ltplatform.generator.dto.GeneratorDtos.GeneratorResponse;
 import com.ltplatform.generator.dto.GeneratorDtos.ProvisionStepResponse;
+import com.ltplatform.generator.dto.GeneratorDtos.UpdateCredentialRequest;
 import com.ltplatform.generator.dto.GeneratorDtos.UpdateGeneratorRequest;
 import com.ltplatform.generator.service.GeneratorLogService;
 import com.ltplatform.generator.service.GeneratorLogService.LogEntry;
@@ -133,6 +134,21 @@ public class GeneratorController {
     @GetMapping("/ssh-credentials")
     public List<CredentialResponse> listCreds() {
         return generators.listCredentials();
+    }
+
+    @PutMapping("/ssh-credentials/{id}")
+    public CredentialResponse updateCred(
+            @PathVariable UUID id,
+            @RequestBody UpdateCredentialRequest req,
+            Authentication auth
+    ) {
+        return generators.updateCredential(id, req, auth.getName());
+    }
+
+    @DeleteMapping("/ssh-credentials/{id}")
+    public Map<String, String> deleteCred(@PathVariable UUID id, Authentication auth) {
+        generators.deleteCredential(id, auth.getName());
+        return Map.of("status", "deleted");
     }
 
     private static void closeQuietly(AutoCloseable c) {

@@ -8,7 +8,9 @@ import com.ltplatform.generator.dto.GeneratorDtos.CreateCredentialRequest;
 import com.ltplatform.generator.dto.GeneratorDtos.CreateGeneratorRequest;
 import com.ltplatform.generator.dto.GeneratorDtos.CredentialResponse;
 import com.ltplatform.generator.dto.GeneratorDtos.GeneratorResponse;
+import com.ltplatform.generator.dto.GeneratorDtos.UpdateCredentialRequest;
 import com.ltplatform.generator.dto.GeneratorDtos.UpdateGeneratorRequest;
+import java.util.stream.Collectors;
 import com.ltplatform.generator.repo.GeneratorRepository;
 import com.ltplatform.generator.repo.SshCredentialRepository;
 import com.ltplatform.provisioning.service.ProvisioningService;
@@ -62,14 +64,70 @@ public class GeneratorService {
         }
         credentials.save(cred);
         audit.record(actor, "SSH_CREDENTIAL_CREATE", "SshCredential", cred.getId().toString(), Map.of("name", req.name()));
-        return new CredentialResponse(cred.getId(), cred.getName(), cred.getCreatedAt());
+        return toCredentialResponse(cred);
     }
 
     @Transactional(readOnly = true)
     public List<CredentialResponse> listCredentials() {
-        return credentials.findAll().stream()
-                .map(c -> new CredentialResponse(c.getId(), c.getName(), c.getCreatedAt()))
-                .toList();
+        return credentials.findAll().stream().map(this::toCredentialResponse).toList();
+    }
+
+    @Transactional
+    public CredentialResponse updateCredential(UUID id, UpdateCredentialRequest req, String actor) {
+        SshCredential cred = credentials.findById(id)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "SSH credential not found"));
+        if (req.name() != null && !req.name().isBlank()) {
+            cred.setName(req.name().trim());
+        }
+        boolean keyChanged = false;
+        if (req.privateKeyPem() != null && !req.privateKeyPem().isBlank()) {
+            cred.setPrivateKeyEnc(secretBox.encryptString(SshClientFactory.normalizePem(req.privateKeyPem())));
+            cred.setKnownHosts(null);
+            keyChanged = true;
+        }
+        if (req.passphrase() != null) {
+            if (req.passphrase().isBlank()) {
+                cred.setPassphraseEnc(null);
+            } else {
+                cred.setPassphraseEnc(secretBox.encryptString(req.passphrase()));
+            }
+            if (!keyChanged) {
+                // passphrase change alone also invalidates prior host-key TOFU association with old sessions
+                cred.setKnownHosts(null);
+            }
+        }
+        credentials.save(cred);
+        audit.record(actor, "SSH_CREDENTIAL_UPDATE", "SshCredential", id.toString(),
+                Map.of("name", cred.getName(), "keyChanged", keyChanged));
+        return toCredentialResponse(cred);
+    }
+
+    @Transactional
+    public void deleteCredential(UUID id, String actor) {
+        SshCredential cred = credentials.findById(id)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "SSH credential not found"));
+        List<Generator> users = generators.findBySshCredentialId(id);
+        if (!users.isEmpty()) {
+            String names = users.stream()
+                    .map(g -> g.getName() + " (" + g.getId() + ")")
+                    .collect(Collectors.joining(", "));
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "Cannot delete SSH credential \"" + cred.getName()
+                            + "\": used by generators: " + names
+                            + ". Delete those generators or assign them another credential first.");
+        }
+        credentials.delete(cred);
+        audit.record(actor, "SSH_CREDENTIAL_DELETE", "SshCredential", id.toString(),
+                Map.of("name", cred.getName()));
+    }
+
+    private CredentialResponse toCredentialResponse(SshCredential cred) {
+        return new CredentialResponse(
+                cred.getId(),
+                cred.getName(),
+                cred.getCreatedAt(),
+                generators.countBySshCredentialId(cred.getId())
+        );
     }
 
     @Transactional

@@ -15,7 +15,13 @@ public final class GeneratorDtos {
             String passphrase
     ) {}
 
-    public record CredentialResponse(UUID id, String name, Instant createdAt) {}
+    public record UpdateCredentialRequest(
+            String name,
+            String privateKeyPem,
+            String passphrase
+    ) {}
+
+    public record CredentialResponse(UUID id, String name, Instant createdAt, long inUseCount) {}
 
     public record CreateGeneratorRequest(
             @NotBlank String name,
