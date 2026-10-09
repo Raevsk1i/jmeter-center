@@ -1,5 +1,6 @@
 package com.ltplatform.provisioning.service;
 
+import com.ltplatform.agent.session.AgentSessionRegistry;
 import com.ltplatform.common.ApiException;
 import com.ltplatform.config.LtPlatformProperties;
 import com.ltplatform.generator.domain.Generator;
@@ -10,10 +11,15 @@ import com.ltplatform.generator.repo.GeneratorRepository;
 import com.ltplatform.generator.repo.SshCredentialRepository;
 import com.ltplatform.generator.service.GeneratorLogService;
 import com.ltplatform.provisioning.ssh.SshClientFactory;
+import com.ltplatform.settings.service.SettingsService;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -37,6 +43,8 @@ public class ProvisioningService {
     private final LtPlatformProperties props;
     private final JdbcTemplate jdbc;
     private final GeneratorLogService genLogs;
+    private final SettingsService settings;
+    private final AgentSessionRegistry sessions;
 
     public ProvisioningService(
             GeneratorRepository generators,
@@ -44,7 +52,9 @@ public class ProvisioningService {
             SshClientFactory ssh,
             LtPlatformProperties props,
             JdbcTemplate jdbc,
-            GeneratorLogService genLogs
+            GeneratorLogService genLogs,
+            SettingsService settings,
+            AgentSessionRegistry sessions
     ) {
         this.generators = generators;
         this.credentials = credentials;
@@ -52,6 +62,8 @@ public class ProvisioningService {
         this.props = props;
         this.jdbc = jdbc;
         this.genLogs = genLogs;
+        this.settings = settings;
+        this.sessions = sessions;
     }
 
     @Async("orchestrationExecutor")
@@ -65,8 +77,8 @@ public class ProvisioningService {
     }
 
     public void provision(UUID generatorId) throws Exception {
-        Generator g = generators.findById(generatorId)
-                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Generator not found"));
+        // Brief retry: after-commit scheduling should make the row visible, but tolerate slow commit visibility.
+        Generator g = waitForGenerator(generatorId, 10);
         SshCredential cred = credentials.findById(g.getSshCredentialId())
                 .orElseThrow(() -> new ApiException(HttpStatus.BAD_REQUEST, "SSH credential missing"));
 
@@ -74,19 +86,25 @@ public class ProvisioningService {
         genLogs.info(generatorId, "PROVISION", "START",
                 "Provisioning started for " + g.getHostname() + ":" + g.getSshPort() + " as " + g.getSshUser());
 
+        String advertiseHost = resolveControllerAdvertiseHost();
+        int grpcPort = props.getGrpc().getPort();
+        String controllerAddr = advertiseHost + ":" + grpcPort;
+        genLogs.info(generatorId, "PROVISION", "CONTROLLER",
+                "Remote agent will dial gRPC " + controllerAddr);
+
         try (SSHClient client = ssh.connect(g.getHostname(), g.getSshPort(), g.getSshUser(), cred)) {
             credentials.save(cred);
             runStep(g, "CONNECT", "SSH connected");
             genLogs.info(generatorId, "PROVISION", "CONNECT", "SSH connection established");
 
             var os = execLogged(client, generatorId, "DETECT_OS",
-                    "cat /etc/os-release | head -5; uname -m; sudo -n true 2>/dev/null; echo SUDO:$?", 30);
+                    "cat /etc/os-release | head -5; uname -m; id; sudo -n true 2>/dev/null; echo SUDO:$?", 30);
             runStep(g, "DETECT_OS", truncate(os.stdout().trim(), 500));
 
             runStep(g, "INSTALL_JAVA", "Ensuring Java 21");
             execLogged(client, generatorId, "INSTALL_JAVA", """
-                    if ! java -version 2>&1 | grep -q '21'; then
-                      (sudo dnf install -y java-21-openjdk-devel || sudo yum install -y java-21-openjdk-devel) || true
+                    if ! java -version 2>&1 | grep -Eq 'version "21'; then
+                      (sudo dnf install -y java-21-openjdk-devel || sudo yum install -y java-21-openjdk-devel || true)
                     fi
                     java -version 2>&1 | head -1
                     """, 300);
@@ -94,7 +112,7 @@ public class ProvisioningService {
             runStep(g, "INSTALL_JMETER", "Copying JMeter bundle");
             Path bundle = Path.of(props.getJmeterBundlePath());
             execLogged(client, generatorId, "INSTALL_JMETER",
-                    "sudo mkdir -p /opt/lt-jmeter && sudo chown $(whoami) /opt/lt-jmeter", 30);
+                    "sudo mkdir -p /opt/lt-jmeter && sudo chown $(whoami) /opt/lt-jmeter || true", 30);
             if (Files.isRegularFile(bundle)) {
                 genLogs.info(generatorId, "PROVISION", "INSTALL_JMETER",
                         "Uploading JMeter archive from " + bundle);
@@ -104,7 +122,7 @@ public class ProvisioningService {
                         "tar -xzf /tmp/jmeter-bundle.tgz -C /opt/lt-jmeter --strip-components=1 || true", 120);
             } else if (Files.isDirectory(bundle)) {
                 genLogs.info(generatorId, "PROVISION", "INSTALL_JMETER",
-                        "JMeter bundle is a directory marker at " + bundle);
+                        "JMeter bundle is a directory at " + bundle + "; uploading recursive marker");
                 execLogged(client, generatorId, "INSTALL_JMETER",
                         "mkdir -p /opt/lt-jmeter && echo 'bundle-dir' > /opt/lt-jmeter/.installed", 30);
             } else {
@@ -123,64 +141,100 @@ public class ProvisioningService {
 
             runStep(g, "INSTALL_AGENT", "Installing Go agent");
             Path agentBin = Path.of(props.getAgentBinaryPath());
-            if (Files.isRegularFile(agentBin)) {
-                genLogs.info(generatorId, "PROVISION", "INSTALL_AGENT",
-                        "Uploading agent binary from " + agentBin);
-                byte[] bin = Files.readAllBytes(agentBin);
-                ssh.upload(client, bin, "/tmp/lt-agent");
-                execLogged(client, generatorId, "INSTALL_AGENT",
-                        "sudo mv /tmp/lt-agent /opt/lt-agent/lt-agent && sudo chmod +x /opt/lt-agent/lt-agent && sudo chown lt-agent:lt-agent /opt/lt-agent/lt-agent", 30);
-            } else {
-                genLogs.error(generatorId, "PROVISION", "INSTALL_AGENT",
-                        "Agent binary missing at " + agentBin);
-                execLogged(client, generatorId, "INSTALL_AGENT",
-                        "echo 'agent-binary-missing' > /opt/lt-agent/MISSING", 10);
+            if (!Files.isRegularFile(agentBin)) {
+                String msg = "Agent binary missing at " + agentBin
+                        + " — build/push lt-agent into the controller image or set LT_AGENT_BINARY";
+                genLogs.error(generatorId, "PROVISION", "INSTALL_AGENT", msg);
+                throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, msg);
+            }
+            genLogs.info(generatorId, "PROVISION", "INSTALL_AGENT",
+                    "Uploading agent binary from " + agentBin + " (" + Files.size(agentBin) + " bytes)");
+            byte[] bin = Files.readAllBytes(agentBin);
+            ssh.upload(client, bin, "/tmp/lt-agent");
+            var install = execLogged(client, generatorId, "INSTALL_AGENT",
+                    "sudo mv /tmp/lt-agent /opt/lt-agent/lt-agent && sudo chmod +x /opt/lt-agent/lt-agent"
+                            + " && sudo chown lt-agent:lt-agent /opt/lt-agent/lt-agent"
+                            + " && /opt/lt-agent/lt-agent -h 2>&1 | head -3 || file /opt/lt-agent/lt-agent || true", 30);
+            if (!install.ok()) {
+                throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
+                        "Failed to install agent binary: " + truncate(install.stderr(), 500));
             }
 
             String bootstrap = UUID.randomUUID().toString();
             String unit = """
                     [Unit]
                     Description=LT Platform Go Agent
-                    After=network.target
+                    After=network-online.target
+                    Wants=network-online.target
 
                     [Service]
                     Type=simple
                     User=lt-agent
-                    Environment=LT_CONTROLLER=%s:%d
+                    Environment=LT_CONTROLLER=%s
                     Environment=LT_GENERATOR_ID=%s
                     Environment=LT_BOOTSTRAP_TOKEN=%s
                     Environment=LT_AGENT_ID=%s
+                    Environment=LT_WORK_ROOT=/var/lib/lt-agent/workspaces
+                    Environment=LT_STATE_DIR=/var/lib/lt-agent/state
+                    Environment=LT_JMETER_HOME=/opt/lt-jmeter
+                    Environment=LT_AGENT_VERSION=0.1.0
                     ExecStart=/opt/lt-agent/lt-agent
                     Restart=always
                     RestartSec=5
+                    StandardOutput=journal
+                    StandardError=journal
 
                     [Install]
                     WantedBy=multi-user.target
                     """.formatted(
-                    System.getenv().getOrDefault("LT_CONTROLLER_HOST", "controller"),
-                    props.getGrpc().getPort(),
+                    controllerAddr,
                     g.getId(),
                     bootstrap,
                     "agent-" + g.getId()
             );
-            runStep(g, "CONFIGURE", "Writing systemd unit");
+            runStep(g, "CONFIGURE", "Writing systemd unit → " + controllerAddr);
             genLogs.info(generatorId, "PROVISION", "CONFIGURE",
-                    "systemd unit → LT_CONTROLLER="
-                            + System.getenv().getOrDefault("LT_CONTROLLER_HOST", "controller")
-                            + ":" + props.getGrpc().getPort());
+                    "systemd unit LT_CONTROLLER=" + controllerAddr + " LT_GENERATOR_ID=" + g.getId());
             ssh.upload(client, unit.getBytes(), "/tmp/lt-agent.service");
-            execLogged(client, generatorId, "CONFIGURE",
-                    "sudo mv /tmp/lt-agent.service /etc/systemd/system/lt-agent.service && sudo systemctl daemon-reload && sudo systemctl enable --now lt-agent || true", 60);
+            var configure = execLogged(client, generatorId, "CONFIGURE",
+                    "sudo mv /tmp/lt-agent.service /etc/systemd/system/lt-agent.service"
+                            + " && sudo systemctl daemon-reload"
+                            + " && sudo systemctl enable lt-agent"
+                            + " && sudo systemctl restart lt-agent"
+                            + " && sleep 1"
+                            + " && sudo systemctl is-active lt-agent"
+                            + " && sudo systemctl status lt-agent --no-pager -l | head -40", 90);
+            if (!configure.ok() && !configure.stdout().contains("active")) {
+                String journal = execLogged(client, generatorId, "CONFIGURE",
+                        "sudo journalctl -u lt-agent -n 80 --no-pager || true", 30).stdout();
+                throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
+                        "Failed to start lt-agent systemd unit. journal: " + truncate(journal, 1500));
+            }
 
-            runStep(g, "REGISTER_WAIT", "Waiting for agent registration");
+            runStep(g, "REGISTER_WAIT", "Waiting for agent gRPC registration at " + controllerAddr);
             g.setProvisionStep("REGISTER_WAIT");
             generators.save(g);
             genLogs.info(generatorId, "PROVISION", "REGISTER_WAIT",
-                    "SSH bootstrap done; waiting for agent gRPC registration");
+                    "Agent service started; waiting up to " + props.getAgentRegisterWaitSeconds()
+                            + "s for gRPC registration");
 
-            runStep(g, "VERIFY", "Provisioning steps completed; awaiting agent heartbeat");
+            boolean registered = waitForAgentRegistration(client, generatorId, props.getAgentRegisterWaitSeconds());
+            if (!registered) {
+                String journal = execLogged(client, generatorId, "REGISTER_WAIT",
+                        "sudo journalctl -u lt-agent -n 100 --no-pager || true", 30).stdout();
+                genLogs.error(generatorId, "PROVISION", "REGISTER_WAIT",
+                        "Agent did not register within timeout. Check LT_CONTROLLER=" + controllerAddr
+                                + " is reachable from the generator and port " + grpcPort + " is open. journal tail:\n"
+                                + truncate(journal, 3000));
+                throw new ApiException(HttpStatus.GATEWAY_TIMEOUT,
+                        "Agent started but did not register with controller at " + controllerAddr
+                                + " within " + props.getAgentRegisterWaitSeconds()
+                                + "s. Ensure generators can reach that host:port (gRPC). See generator logs for journalctl.");
+            }
+
+            runStep(g, "VERIFY", "Agent registered; generator AVAILABLE");
             genLogs.info(generatorId, "PROVISION", "VERIFY",
-                    "Provisioning pipeline finished; status will become AVAILABLE after agent connects");
+                    "Provisioning complete — agent connected and generator is AVAILABLE");
         } catch (Exception e) {
             genLogs.error(generatorId, "PROVISION", "FAILED", e.getMessage());
             throw e;
@@ -220,6 +274,100 @@ public class ProvisioningService {
                 ),
                 generatorId
         );
+    }
+
+    /**
+     * Host/IP written into remote agent systemd units. Order:
+     * 1) Settings controller.advertiseHost
+     * 2) LT_CONTROLLER_HOST / ltplatform.controller-advertise-host
+     * 3) Best-effort non-loopback IPv4 of this process
+     */
+    String resolveControllerAdvertiseHost() {
+        Map<String, Object> cfg = settings.getMap("controller");
+        Object fromSettings = cfg.get("advertiseHost");
+        if (fromSettings != null && !String.valueOf(fromSettings).isBlank()) {
+            return String.valueOf(fromSettings).trim();
+        }
+        if (props.getControllerAdvertiseHost() != null && !props.getControllerAdvertiseHost().isBlank()) {
+            return props.getControllerAdvertiseHost().trim();
+        }
+        String detected = detectOutboundIpv4();
+        if (detected != null) {
+            log.warn("LT_CONTROLLER_HOST unset; using detected address {} for remote agents", detected);
+            return detected;
+        }
+        return "127.0.0.1";
+    }
+
+    private boolean waitForAgentRegistration(SSHClient client, UUID generatorId, int timeoutSeconds)
+            throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutSeconds * 1000L;
+        int attempt = 0;
+        while (System.currentTimeMillis() < deadline) {
+            attempt++;
+            if (sessions.isOnline(generatorId)) {
+                genLogs.info(generatorId, "PROVISION", "REGISTER_WAIT",
+                        "Agent session online after " + attempt + " poll(s)");
+                return true;
+            }
+            Generator refreshed = generators.findById(generatorId).orElse(null);
+            if (refreshed != null && refreshed.getStatus() == GeneratorStatus.AVAILABLE
+                    && refreshed.getLastHeartbeatAt() != null) {
+                genLogs.info(generatorId, "PROVISION", "REGISTER_WAIT",
+                        "Generator status AVAILABLE with heartbeat");
+                return true;
+            }
+            if (attempt == 1 || attempt % 5 == 0) {
+                var status = ssh.exec(client,
+                        "sudo systemctl is-active lt-agent; sudo journalctl -u lt-agent -n 15 --no-pager || true",
+                        20);
+                genLogs.append(generatorId, "PROVISION", "INFO", "REGISTER_WAIT_POLL",
+                        "Still waiting for gRPC register (poll #" + attempt + ")",
+                        Map.of(
+                                "systemd", truncate(status.stdout(), 1500),
+                                "stderr", truncate(status.stderr(), 500)
+                        ));
+            }
+            Thread.sleep(2000);
+        }
+        return false;
+    }
+
+    private Generator waitForGenerator(UUID generatorId, int attempts) throws InterruptedException {
+        for (int i = 0; i < attempts; i++) {
+            var opt = generators.findById(generatorId);
+            if (opt.isPresent()) {
+                return opt.get();
+            }
+            Thread.sleep(200L * (i + 1));
+        }
+        throw new ApiException(HttpStatus.NOT_FOUND, "Generator not found");
+    }
+
+    private static String detectOutboundIpv4() {
+        try {
+            try (var socket = new java.net.DatagramSocket()) {
+                socket.connect(InetAddress.getByName("8.8.8.8"), 53);
+                InetAddress local = socket.getLocalAddress();
+                if (local instanceof Inet4Address && !local.isLoopbackAddress()) {
+                    return local.getHostAddress();
+                }
+            }
+        } catch (Exception ignored) {
+            // fall through to interface scan
+        }
+        try {
+            for (NetworkInterface nif : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (!nif.isUp() || nif.isLoopback() || nif.isVirtual()) continue;
+                for (InetAddress addr : Collections.list(nif.getInetAddresses())) {
+                    if (addr instanceof Inet4Address && !addr.isLoopbackAddress() && !addr.isLinkLocalAddress()) {
+                        return addr.getHostAddress();
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
     }
 
     private SshClientFactory.ExecResult execLogged(SSHClient client, UUID generatorId, String step,

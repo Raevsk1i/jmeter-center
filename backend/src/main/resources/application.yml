@@ -35,6 +35,9 @@ ltplatform:
   log-root: ${LT_LOG_ROOT:./data/logs}
   jmeter-bundle-path: ${LT_JMETER_BUNDLE:./data/jmeter}
   agent-binary-path: ${LT_AGENT_BINARY:./data/agent/lt-agent}
+  # Address remote agents dial after SSH bootstrap (host/IP reachable from generators)
+  controller-advertise-host: ${LT_CONTROLLER_HOST:}
+  agent-register-wait-seconds: ${LT_AGENT_REGISTER_WAIT_SECONDS:90}
   grpc:
     port: ${LT_GRPC_PORT:9090}
     certs-dir: ${LT_CERTS_DIR:./data/certs}

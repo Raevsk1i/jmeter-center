@@ -13,6 +13,7 @@ export function SettingsPage() {
   const [bb, setBb] = useState({ baseUrl: 'https://api.bitbucket.org/2.0', workspace: '', repo: '', token: '' });
   const [retention, setRetention] = useState({ logRetentionDays: 30 });
   const [jmeter, setJmeter] = useState({ rmiPort: 1099, localPort: 4000 });
+  const [controller, setController] = useState({ advertiseHost: '', grpcPort: 9090 });
   const [login, setLogin] = useState({ username: 'admin', password: 'admin' });
   const [msg, setMsg] = useState('');
 
@@ -30,6 +31,11 @@ export function SettingsPage() {
     if (ret.logRetentionDays) setRetention({ logRetentionDays: Number(ret.logRetentionDays) });
     const jm = (data.jmeter || {}) as Record<string, number>;
     if (jm.rmiPort) setJmeter({ rmiPort: Number(jm.rmiPort), localPort: Number(jm.localPort || 4000) });
+    const ctrl = (data.controller || {}) as Record<string, string | number>;
+    setController({
+      advertiseHost: String(ctrl.advertiseHost || ''),
+      grpcPort: Number(ctrl.grpcPort || 9090),
+    });
   }, [data]);
 
   const saveBb = useMutation({
@@ -45,6 +51,14 @@ export function SettingsPage() {
     mutationFn: () => api.put('/api/v1/settings/jmeter', jmeter),
     onSuccess: () => setMsg('JMeter settings saved'),
   });
+  const saveController = useMutation({
+    mutationFn: () => api.put('/api/v1/settings/controller', { advertiseHost: controller.advertiseHost }),
+    onSuccess: () => {
+      setMsg('Controller advertise host saved — used by SSH-provisioned agents');
+      qc.invalidateQueries({ queryKey: ['settings'] });
+    },
+    onError: (e: Error) => setMsg(e.message),
+  });
 
   return (
     <Stack spacing={3}>
@@ -52,7 +66,26 @@ export function SettingsPage() {
         <Typography variant="h4">Settings</Typography>
         <Typography color="text.secondary">Bitbucket, storage paths, agent/gRPC, retention</Typography>
       </Box>
-      {msg && <Alert severity="success" onClose={() => setMsg('')}>{msg}</Alert>}
+      {msg && <Alert severity={msg.includes('saved') || msg.includes('stored') ? 'success' : 'error'} onClose={() => setMsg('')}>{msg}</Alert>}
+
+      <Box sx={{ p: 2.5, borderRadius: 2, border: '1px solid', borderColor: 'divider', bgcolor: 'background.paper' }}>
+        <Typography variant="h6" gutterBottom>Agent controller address</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+          Host/IP that generators dial after SSH bootstrap (gRPC port {controller.grpcPort}).
+          Must be reachable from generator hosts — not the Docker service name unless agents share the Compose network.
+        </Typography>
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ sm: 'center' }}>
+          <TextField
+            label="Advertise host / IP"
+            value={controller.advertiseHost}
+            onChange={(e) => setController({ ...controller, advertiseHost: e.target.value })}
+            fullWidth
+            placeholder="e.g. 203.0.113.10"
+            helperText="Or set env LT_CONTROLLER_HOST on the controller"
+          />
+          <Button variant="contained" onClick={() => saveController.mutate()}>Save</Button>
+        </Stack>
+      </Box>
 
       <Box sx={{ p: 2.5, borderRadius: 2, border: '1px solid', borderColor: 'divider', bgcolor: 'background.paper' }}>
         <Typography variant="h6" gutterBottom>Session Login</Typography>
