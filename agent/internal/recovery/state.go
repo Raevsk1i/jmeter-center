@@ -74,6 +74,19 @@ func (s *State) MarkCommand(id string) {
         _ = s.persistLocked()
 }
 
+// AdoptFencing sets the token from a controller RegisterResponse.
+// Controller DB is authoritative at session bind; local state.json may be
+// higher after a DB reset / generator recreate, and must not block the session.
+func (s *State) AdoptFencing(token int64) (previous int64) {
+        s.mu.Lock()
+        defer s.mu.Unlock()
+        previous = s.FencingToken
+        s.FencingToken = token
+        _ = s.persistLocked()
+        return previous
+}
+
+// AcceptFencing accepts a command lease token (monotonic: token >= current).
 func (s *State) AcceptFencing(token int64) bool {
         s.mu.Lock()
         defer s.mu.Unlock()
@@ -83,6 +96,12 @@ func (s *State) AcceptFencing(token int64) bool {
         s.FencingToken = token
         _ = s.persistLocked()
         return true
+}
+
+func (s *State) CurrentFencing() int64 {
+        s.mu.Lock()
+        defer s.mu.Unlock()
+        return s.FencingToken
 }
 
 func (s *State) SetExecution(ex *ExecutionState) {

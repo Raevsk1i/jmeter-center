@@ -98,8 +98,13 @@ func (c *Client) session() error {
         if reg == nil || !reg.Accepted {
                 return fmt.Errorf("registration rejected: %v", reg)
         }
-        log.Printf("registered session=%s fencing=%d", reg.SessionId, reg.FencingToken)
-        _ = c.state.AcceptFencing(reg.FencingToken)
+        prevFence := c.state.AdoptFencing(reg.FencingToken)
+        if prevFence > reg.FencingToken {
+                log.Printf("registered session=%s fencing=%d (adopted controller token; local was higher: %d)",
+                        reg.SessionId, reg.FencingToken, prevFence)
+        } else {
+                log.Printf("registered session=%s fencing=%d", reg.SessionId, reg.FencingToken)
+        }
 
         // write issued certs if present
         if len(reg.ClientCertPem) > 0 {
@@ -183,7 +188,11 @@ func (c *Client) handleCommand(stream agentv1.AgentControl_AgentSessionClient, c
         }
         if !c.state.AcceptFencing(cmd.FencingToken) {
                 result.Success = false
-                result.Message = "stale fencing token"
+                result.Message = fmt.Sprintf("stale fencing token: command=%d local=%d",
+                        cmd.FencingToken, c.state.CurrentFencing())
+                result.Attributes["commandFencingToken"] = strconv.FormatInt(cmd.FencingToken, 10)
+                result.Attributes["localFencingToken"] = strconv.FormatInt(c.state.CurrentFencing(), 10)
+                log.Printf("rejecting command %s: %s", cmd.CommandId, result.Message)
                 return
         }
 

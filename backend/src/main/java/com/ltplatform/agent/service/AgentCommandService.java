@@ -140,6 +140,28 @@ public class AgentCommandService {
                 .build();
     }
 
+    /**
+     * Disconnect the agent so it reconnects and adopts the controller fencing token from RegisterResponse.
+     */
+    public void resyncFencing(UUID generatorId) throws InterruptedException {
+        genLogs.warn(generatorId, "AGENT_CMD", "FENCING_RESYNC",
+                "Disconnecting agent to re-adopt controller fencing token");
+        sessions.disconnect(generatorId);
+        long deadline = System.currentTimeMillis() + 60_000;
+        while (System.currentTimeMillis() < deadline) {
+            if (sessions.isOnline(generatorId)) {
+                Thread.sleep(750);
+                if (sessions.isOnline(generatorId)) {
+                    genLogs.info(generatorId, "AGENT_CMD", "FENCING_RESYNC",
+                            "Agent reconnected after fencing resync");
+                    return;
+                }
+            }
+            Thread.sleep(500);
+        }
+        throw new IllegalStateException("Agent did not reconnect within 60s after fencing disconnect");
+    }
+
     private CommandOutcome send(UUID generatorId, String runId, long fencingToken, String commandName,
                                 Consumer<CommandEnvelope.Builder> configurator, long timeout) {
         return send(generatorId, runId, fencingToken, commandName, configurator, timeout, Map.of());
@@ -148,6 +170,28 @@ public class AgentCommandService {
     private CommandOutcome send(UUID generatorId, String runId, long fencingToken, String commandName,
                                 Consumer<CommandEnvelope.Builder> configurator, long timeout,
                                 Map<String, Object> extraDetail) {
+        CommandOutcome outcome = sendOnce(generatorId, runId, fencingToken, commandName, configurator, timeout, extraDetail);
+        if (outcome.success() || !isStaleFencing(outcome.message())) {
+            return outcome;
+        }
+        genLogs.warn(generatorId, "AGENT_CMD", "FENCING_RESYNC",
+                "Stale fencing on " + commandName + ": " + truncate(outcome.message(), 300)
+                        + " — resyncing agent session and retrying once");
+        try {
+            resyncFencing(generatorId);
+        } catch (Exception e) {
+            genLogs.error(generatorId, "AGENT_CMD", "FENCING_RESYNC",
+                    "Resync failed: " + e.getMessage());
+            return new CommandOutcome(false,
+                    outcome.message() + "; fencing resync failed: " + e.getMessage(),
+                    outcome.attributes() != null ? outcome.attributes() : Map.of());
+        }
+        return sendOnce(generatorId, runId, fencingToken, commandName, configurator, timeout, extraDetail);
+    }
+
+    private CommandOutcome sendOnce(UUID generatorId, String runId, long fencingToken, String commandName,
+                                    Consumer<CommandEnvelope.Builder> configurator, long timeout,
+                                    Map<String, Object> extraDetail) {
         String commandId = UUID.randomUUID().toString();
         CommandEnvelope.Builder builder = CommandEnvelope.newBuilder()
                 .setCommandId(commandId)
@@ -209,6 +253,10 @@ public class AgentCommandService {
                     "← TIMEOUT/ERROR " + commandName + ": " + e.getMessage());
             return new CommandOutcome(false, e.getMessage(), Map.of());
         }
+    }
+
+    private static boolean isStaleFencing(String message) {
+        return message != null && message.toLowerCase().contains("stale fencing");
     }
 
     private static String summarizeExtra(String commandName, Map<String, Object> extra) {
