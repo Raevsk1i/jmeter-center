@@ -50,6 +50,8 @@ services:
     volumes:
       - controller-data:/data
       - ../fixtures:/fixtures:ro
+      # Распакованный Apache JMeter из ../jmeter (см. ../jmeter/README.md)
+      - ../jmeter:/data/jmeter:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -83,7 +85,7 @@ services:
       dockerfile: deploy/Dockerfile.agent
     environment:
       LT_CONTROLLER: controller:9090
-      LT_GENERATOR_ID: ${DEMO_GENERATOR_ID:?Set DEMO_GENERATOR_ID to the Generator UUID from the UI/API}
+      LT_GENERATOR_ID: ${DEMO_GENERATOR_ID:-}
       LT_AGENT_ID: ${LT_AGENT_ID:-agent-1}
       LT_BOOTSTRAP_TOKEN: ${LT_BOOTSTRAP_TOKEN:-demo}
       LT_WORK_ROOT: /var/lib/lt-agent/workspaces
@@ -92,8 +94,7 @@ services:
       LT_AGENT_VERSION: "0.1.0"
     volumes:
       - agent1-state:/var/lib/lt-agent
-      # Опционально: подключить реальный Apache JMeter вместо stub из образа
-      # - /opt/apache-jmeter-5.6:/opt/lt-jmeter:ro
+      - ../jmeter:/opt/lt-jmeter:ro
     depends_on:
       controller:
         condition: service_healthy
@@ -106,7 +107,7 @@ services:
       dockerfile: deploy/Dockerfile.agent
     environment:
       LT_CONTROLLER: controller:9090
-      LT_GENERATOR_ID: ${DEMO_GENERATOR_ID_2:?Set DEMO_GENERATOR_ID_2 to the second Generator UUID}
+      LT_GENERATOR_ID: ${DEMO_GENERATOR_ID_2:-}
       LT_AGENT_ID: ${LT_AGENT_ID_2:-agent-2}
       LT_BOOTSTRAP_TOKEN: ${LT_BOOTSTRAP_TOKEN:-demo}
       LT_WORK_ROOT: /var/lib/lt-agent/workspaces
@@ -115,6 +116,7 @@ services:
       LT_AGENT_VERSION: "0.1.0"
     volumes:
       - agent2-state:/var/lib/lt-agent
+      - ../jmeter:/opt/lt-jmeter:ro
     depends_on:
       controller:
         condition: service_healthy

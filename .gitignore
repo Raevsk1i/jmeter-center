@@ -36,3 +36,7 @@ deploy/certs/*.crt
 
 # Agent binary artifact (rebuilt in CI)
 deploy/lt-agent
+
+# Local Apache JMeter distribution (keep jmeter/README.md)
+jmeter/*
+!jmeter/README.md
