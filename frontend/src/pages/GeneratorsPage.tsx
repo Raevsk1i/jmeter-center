@@ -167,6 +167,17 @@ export function GeneratorsPage() {
                 <Chip key={s.stepName + s.message} label={`${s.stepName}: ${s.status}`} sx={{ justifyContent: 'flex-start' }} />
               ))}
               {steps.length === 0 && <LinearProgress />}
+              {createdId && (
+                <Button
+                  component={RouterLink}
+                  to={`/generators/${createdId}`}
+                  variant="outlined"
+                  sx={{ alignSelf: 'flex-start', mt: 1 }}
+                  onClick={() => setWizardOpen(false)}
+                >
+                  Open live diagnostic logs
+                </Button>
+              )}
             </Stack>
           )}
         </DialogContent>

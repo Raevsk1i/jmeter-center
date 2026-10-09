@@ -20,17 +20,20 @@ public class HeartbeatMonitor {
     private final GeneratorService generatorService;
     private final AgentSessionRegistry sessions;
     private final LtPlatformProperties props;
+    private final GeneratorLogService genLogs;
 
     public HeartbeatMonitor(
             GeneratorRepository generators,
             GeneratorService generatorService,
             AgentSessionRegistry sessions,
-            LtPlatformProperties props
+            LtPlatformProperties props,
+            GeneratorLogService genLogs
     ) {
         this.generators = generators;
         this.generatorService = generatorService;
         this.sessions = sessions;
         this.props = props;
+        this.genLogs = genLogs;
     }
 
     @Scheduled(fixedDelayString = "15000")
@@ -40,6 +43,9 @@ public class HeartbeatMonitor {
         for (Generator g : stale) {
             if (!sessions.isOnline(g.getId())) {
                 log.warn("Generator {} heartbeat timeout -> OFFLINE (reservation retained if any)", g.getId());
+                genLogs.warn(g.getId(), "AGENT_CONN", "HEARTBEAT_TIMEOUT",
+                        "No heartbeat within " + props.getHeartbeatTimeoutSeconds()
+                                + "s and agent session offline → status OFFLINE (reservation retained)");
                 generatorService.markOffline(g.getId());
             }
         }

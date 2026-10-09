@@ -6,6 +6,7 @@ import { AppShell } from './layout/AppShell';
 import { useDefaultAuth } from './pages/LoginGate';
 import { DashboardPage } from './pages/DashboardPage';
 import { GeneratorsPage } from './pages/GeneratorsPage';
+import { GeneratorDetailPage } from './pages/GeneratorDetailPage';
 import { RepositoryPage } from './pages/RepositoryPage';
 import { ExecutionPage } from './pages/ExecutionPage';
 import { HistoryPage } from './pages/HistoryPage';
@@ -28,7 +29,7 @@ function RoutedApp() {
           <Route element={<AppShell mode={mode} onToggleTheme={() => setMode((m) => (m === 'dark' ? 'light' : 'dark'))} />}>
             <Route path="/" element={<DashboardPage />} />
             <Route path="/generators" element={<GeneratorsPage />} />
-            <Route path="/generators/:id" element={<GeneratorsPage />} />
+            <Route path="/generators/:id" element={<GeneratorDetailPage />} />
             <Route path="/repository" element={<RepositoryPage />} />
             <Route path="/execution" element={<ExecutionPage />} />
             <Route path="/execution/:runId" element={<ExecutionPage />} />
