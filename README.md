@@ -22,6 +22,18 @@ cd deploy
 cp .env.example .env   # при необходимости отредактируйте пароль админа
 ```
 
+**Apache JMeter** положите в каталог `jmeter/` в корне репозитория (рядом с `deploy/`, `agent/`, `backend/`):
+
+```bash
+# из корня репозитория
+curl -L -o /tmp/jmeter.tgz https://dlcdn.apache.org/jmeter/binaries/apache-jmeter-5.6.3.tgz
+mkdir -p jmeter
+tar -xzf /tmp/jmeter.tgz -C jmeter --strip-components=1
+# должны появиться jmeter/bin/jmeter и jmeter/bin/jmeter-server
+```
+
+Compose монтирует `jmeter/` в агенты как `/opt/lt-jmeter` и в Controller как `/data/jmeter`. Подробности — в [`jmeter/README.md`](jmeter/README.md).
+
 Параметры в `.env`:
 
 | Переменная | Назначение | По умолчанию |
@@ -111,12 +123,15 @@ echo "$GEN" | python3 -m json.tool
 ```bash
 cd deploy
 
-# Подставьте UUID из шага 2.1
+# Подставьте UUID из шага 2.1 (обязательно непустой)
 export DEMO_GENERATOR_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+test -n "$DEMO_GENERATOR_ID" || { echo "DEMO_GENERATOR_ID is empty"; exit 1; }
 
 docker compose --profile agents up --build -d agent-1
 docker compose logs -f agent-1
 ```
+
+> Если `LT_GENERATOR_ID` пустой, агент не сможет зарегистрироваться. Всегда задавайте `DEMO_GENERATOR_ID` перед `docker compose --profile agents up`.
 
 В логах должно появиться:
 
@@ -154,13 +169,7 @@ docker compose --profile agents up --build -d agent-2
 | `LT_WORK_ROOT` | нет | Рабочие каталоги запусков |
 | `LT_STATE_DIR` | нет | Локальный state / command journal |
 
-Образ `Dockerfile.agent` содержит **stub** `jmeter` / `jmeter-server` для проверки оркестрации. Для реальных тестов смонтируйте дистрибутив JMeter:
-
-```yaml
-# в docker-compose.yml у сервиса agent-1
-volumes:
-  - /opt/apache-jmeter-5.6:/opt/lt-jmeter:ro
-```
+Образ `Dockerfile.agent` содержит stub `jmeter` / `jmeter-server`. При наличии файлов в `jmeter/` тома Compose перекрывают stub реальным дистрибутивом (`../jmeter:/opt/lt-jmeter:ro`).
 
 ### 2.5. Агент на RHEL (systemd), не в Docker
 
