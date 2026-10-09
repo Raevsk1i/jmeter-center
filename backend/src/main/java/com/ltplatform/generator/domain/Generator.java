@@ -33,13 +33,13 @@ public class Generator {
     @Column(nullable = false)
     private GeneratorStatus status = GeneratorStatus.PREPARING;
 
-    @Column(name = "agent_version")
+    @Column(name = "agent_version", length = 255)
     private String agentVersion;
 
-    @Column(name = "java_version")
+    @Column(name = "java_version", length = 512)
     private String javaVersion;
 
-    @Column(name = "jmeter_version")
+    @Column(name = "jmeter_version", length = 512)
     private String jmeterVersion;
 
     @Column(name = "cpu_cores")
@@ -87,11 +87,17 @@ public class Generator {
     public GeneratorStatus getStatus() { return status; }
     public void setStatus(GeneratorStatus status) { this.status = status; }
     public String getAgentVersion() { return agentVersion; }
-    public void setAgentVersion(String agentVersion) { this.agentVersion = agentVersion; }
+    public void setAgentVersion(String agentVersion) { this.agentVersion = clip(agentVersion, 255); }
     public String getJavaVersion() { return javaVersion; }
-    public void setJavaVersion(String javaVersion) { this.javaVersion = javaVersion; }
+    public void setJavaVersion(String javaVersion) { this.javaVersion = clip(javaVersion, 512); }
     public String getJmeterVersion() { return jmeterVersion; }
-    public void setJmeterVersion(String jmeterVersion) { this.jmeterVersion = jmeterVersion; }
+    public void setJmeterVersion(String jmeterVersion) { this.jmeterVersion = clip(jmeterVersion, 512); }
+
+    private static String clip(String value, int max) {
+        if (value == null) return null;
+        String trimmed = value.replace('\r', ' ').replace('\n', ' ').trim();
+        return trimmed.length() <= max ? trimmed : trimmed.substring(0, max);
+    }
     public Integer getCpuCores() { return cpuCores; }
     public void setCpuCores(Integer cpuCores) { this.cpuCores = cpuCores; }
     public Long getRamMb() { return ramMb; }

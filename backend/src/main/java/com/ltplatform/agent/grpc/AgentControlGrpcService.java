@@ -129,19 +129,24 @@ public class AgentControlGrpcService extends AgentControlGrpc.AgentControlImplBa
                 conn.setLastSeenAt(Instant.now());
                 connections.save(conn);
 
-                sessions.register(genId, agentId, sessionId, out);
+                // Persist generator first (versions can be long); only then advertise the session online.
                 String prevStatus = generator.getStatus().name();
                 generator.setAgentVersion(req.getAgentVersion());
                 generator.setJavaVersion(req.getJavaVersion());
                 generator.setJmeterVersion(req.getJmeterVersion());
                 generator.setLastHeartbeatAt(Instant.now());
-                if (generator.getStatus() == GeneratorStatus.PREPARING || generator.getStatus() == GeneratorStatus.ERROR) {
+                generator.setProvisionError(null);
+                if (generator.getStatus() == GeneratorStatus.PREPARING
+                        || generator.getStatus() == GeneratorStatus.ERROR
+                        || generator.getStatus() == GeneratorStatus.OFFLINE) {
                     generator.setStatus(GeneratorStatus.AVAILABLE);
                     generator.setProvisionStep("READY");
                 }
                 generator.touch();
-                generators.save(generator);
-                if (generator.getStatus() == GeneratorStatus.OFFLINE) {
+                generators.saveAndFlush(generator);
+
+                sessions.register(genId, agentId, sessionId, out);
+                if ("OFFLINE".equals(prevStatus)) {
                     reconcile.reconcile(genId);
                 }
 
@@ -159,14 +164,14 @@ public class AgentControlGrpcService extends AgentControlGrpc.AgentControlImplBa
                         "Agent registered: agentId=" + agentId
                                 + " session=" + sessionId.substring(0, 8)
                                 + " status " + prevStatus + "→" + generator.getStatus()
-                                + " java=" + req.getJavaVersion()
-                                + " jmeter=" + req.getJmeterVersion(),
+                                + " java=" + generator.getJavaVersion()
+                                + " jmeter=" + generator.getJmeterVersion(),
                         Map.of(
                                 "agentId", agentId,
                                 "sessionId", sessionId,
-                                "agentVersion", req.getAgentVersion(),
-                                "javaVersion", req.getJavaVersion(),
-                                "jmeterVersion", req.getJmeterVersion(),
+                                "agentVersion", generator.getAgentVersion() != null ? generator.getAgentVersion() : "",
+                                "javaVersion", generator.getJavaVersion() != null ? generator.getJavaVersion() : "",
+                                "jmeterVersion", generator.getJmeterVersion() != null ? generator.getJmeterVersion() : "",
                                 "fencingToken", generator.getFencingToken()
                         ));
                 log.info("Agent {} registered for generator {}", agentId, genId);
