@@ -22,7 +22,7 @@ curl -L -o /tmp/jmeter.tgz https://dlcdn.apache.org/jmeter/binaries/apache-jmete
 tar -xzf /tmp/jmeter.tgz -C jmeter --strip-components=1
 ```
 
-Docker Compose монтирует этот каталог:
+Использование:
 
-- в **agent-*** → `/opt/lt-jmeter` (`LT_JMETER_HOME`)
-- в **controller** → `/data/jmeter` (`LT_JMETER_BUNDLE`, для SSH-provisioning на RHEL)
+- **Docker Compose agents** (`--profile agents`): каталог монтируется в `/opt/lt-jmeter` (`LT_JMETER_HOME`).
+- **Controller / SSH-provisioning**: каталог монтируется в `/data/jmeter` (`LT_JMETER_BUNDLE`). При установке генератора Controller упаковывает дерево в `.tgz`, загружает по SFTP и распаковывает в `/opt/lt-jmeter` на хосте.

@@ -7,6 +7,7 @@ import { useDefaultAuth } from './pages/LoginGate';
 import { DashboardPage } from './pages/DashboardPage';
 import { GeneratorsPage } from './pages/GeneratorsPage';
 import { GeneratorDetailPage } from './pages/GeneratorDetailPage';
+import { SecretsPage } from './pages/SecretsPage';
 import { RepositoryPage } from './pages/RepositoryPage';
 import { ExecutionPage } from './pages/ExecutionPage';
 import { HistoryPage } from './pages/HistoryPage';
@@ -30,6 +31,7 @@ function RoutedApp() {
             <Route path="/" element={<DashboardPage />} />
             <Route path="/generators" element={<GeneratorsPage />} />
             <Route path="/generators/:id" element={<GeneratorDetailPage />} />
+            <Route path="/secrets" element={<SecretsPage />} />
             <Route path="/repository" element={<RepositoryPage />} />
             <Route path="/execution" element={<ExecutionPage />} />
             <Route path="/execution/:runId" element={<ExecutionPage />} />

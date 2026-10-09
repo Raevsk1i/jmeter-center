@@ -17,6 +17,10 @@ public interface GeneratorRepository extends JpaRepository<Generator, UUID> {
 
     long countByStatus(GeneratorStatus status);
 
+    List<Generator> findBySshCredentialId(UUID sshCredentialId);
+
+    long countBySshCredentialId(UUID sshCredentialId);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select g from Generator g where g.id in :ids order by g.id")
     List<Generator> findAllByIdForUpdate(@Param("ids") Collection<UUID> ids);

@@ -3,7 +3,7 @@ import {
   ListItemIcon, ListItemText, Toolbar, Typography, useMediaQuery,
 } from '@mui/material';
 import {
-  Dashboard, Dns, AccountTree, History, Menu as MenuIcon,
+  Dashboard, Dns, Key, AccountTree, History, Menu as MenuIcon,
   PlayCircle, Schedule, Settings, Brightness4, Brightness7, ExpandLess, ExpandMore,
 } from '@mui/icons-material';
 import { useState } from 'react';
@@ -18,6 +18,7 @@ const nav = [
     label: 'Resources',
     children: [
       { label: 'Generators', path: '/generators', icon: <Dns /> },
+      { label: 'Secrets', path: '/secrets', icon: <Key /> },
     ],
   },
   {

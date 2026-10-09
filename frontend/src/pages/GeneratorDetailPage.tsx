@@ -1,10 +1,10 @@
 import {
-  Alert, Box, Button, Chip, FormControlLabel, LinearProgress, MenuItem, Stack,
-  Switch, TextField, Typography,
+  Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle,
+  FormControlLabel, LinearProgress, MenuItem, Stack, Switch, TextField, Typography,
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link as RouterLink, useParams } from 'react-router-dom';
+import { Link as RouterLink, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api/client';
 import type { Generator } from '../api/client';
 
@@ -49,6 +49,7 @@ function formatDetail(detail?: Record<string, unknown> | null) {
 
 export function GeneratorDetailPage() {
   const { id = '' } = useParams();
+  const navigate = useNavigate();
   const qc = useQueryClient();
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const [source, setSource] = useState<(typeof SOURCES)[number]>('ALL');
@@ -56,6 +57,8 @@ export function GeneratorDetailPage() {
   const [showDetail, setShowDetail] = useState(true);
   const [logs, setLogs] = useState<GeneratorLog[]>([]);
   const [pollError, setPollError] = useState('');
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
 
   const { data: generator, isLoading, error } = useQuery({
     queryKey: ['generator', id],
@@ -95,6 +98,15 @@ export function GeneratorDetailPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['generator-log-sources', id] });
     },
+  });
+
+  const remove = useMutation({
+    mutationFn: () => api.del(`/api/v1/generators/${id}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['generators'] });
+      navigate('/generators');
+    },
+    onError: (e: Error) => setDeleteError(e.message),
   });
 
   // Initial load + incremental poll (works with Basic auth; SSE cannot set Authorization)
@@ -194,11 +206,31 @@ export function GeneratorDetailPage() {
           <Button size="small" variant="contained" onClick={() => reprovision.mutate()} disabled={reprovision.isPending}>
             Reprovision
           </Button>
+          <Button size="small" color="error" onClick={() => { setConfirmDelete(true); setDeleteError(''); }}>
+            Delete
+          </Button>
         </Stack>
       </Stack>
 
       {generator.provisionError && <Alert severity="error">{generator.provisionError}</Alert>}
       {pollError && <Alert severity="warning">Log stream: {pollError}</Alert>}
+
+      <Dialog open={confirmDelete} onClose={() => setConfirmDelete(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Delete generator?</DialogTitle>
+        <DialogContent>
+          <Typography sx={{ mb: 1 }}>
+            Delete <strong>{generator.name}</strong> ({generator.hostname})?
+            Running or reserved generators cannot be deleted.
+          </Typography>
+          {deleteError && <Alert severity="error">{deleteError}</Alert>}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmDelete(false)}>Cancel</Button>
+          <Button color="error" variant="contained" disabled={remove.isPending} onClick={() => remove.mutate()}>
+            Delete
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Box sx={{
         display: 'grid',
