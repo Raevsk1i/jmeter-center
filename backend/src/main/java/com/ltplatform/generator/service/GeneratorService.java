@@ -12,6 +12,8 @@ import com.ltplatform.generator.dto.GeneratorDtos.UpdateGeneratorRequest;
 import com.ltplatform.generator.repo.GeneratorRepository;
 import com.ltplatform.generator.repo.SshCredentialRepository;
 import com.ltplatform.provisioning.service.ProvisioningService;
+import com.ltplatform.provisioning.ssh.SshAgentTunnelService;
+import com.ltplatform.provisioning.ssh.SshClientFactory;
 import com.ltplatform.security.audit.AuditService;
 import com.ltplatform.security.crypto.SecretBox;
 import java.time.Instant;
@@ -21,6 +23,8 @@ import java.util.UUID;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Service
 public class GeneratorService {
@@ -29,19 +33,22 @@ public class GeneratorService {
     private final SecretBox secretBox;
     private final ProvisioningService provisioning;
     private final AuditService audit;
+    private final SshAgentTunnelService tunnels;
 
     public GeneratorService(
             GeneratorRepository generators,
             SshCredentialRepository credentials,
             SecretBox secretBox,
             ProvisioningService provisioning,
-            AuditService audit
+            AuditService audit,
+            SshAgentTunnelService tunnels
     ) {
         this.generators = generators;
         this.credentials = credentials;
         this.secretBox = secretBox;
         this.provisioning = provisioning;
         this.audit = audit;
+        this.tunnels = tunnels;
     }
 
     @Transactional
@@ -49,7 +56,7 @@ public class GeneratorService {
         SshCredential cred = new SshCredential();
         cred.setId(UUID.randomUUID());
         cred.setName(req.name());
-        cred.setPrivateKeyEnc(secretBox.encryptString(req.privateKeyPem()));
+        cred.setPrivateKeyEnc(secretBox.encryptString(SshClientFactory.normalizePem(req.privateKeyPem())));
         if (req.passphrase() != null && !req.passphrase().isBlank()) {
             cred.setPassphraseEnc(secretBox.encryptString(req.passphrase()));
         }
@@ -81,7 +88,7 @@ public class GeneratorService {
         generators.save(g);
         audit.record(actor, "GENERATOR_CREATE", "Generator", g.getId().toString(), Map.of("hostname", g.getHostname()));
         if (req.provisionNow()) {
-            provisioning.provisionAsync(g.getId());
+            scheduleProvisionAfterCommit(g.getId());
         }
         return toResponse(g);
     }
@@ -116,6 +123,7 @@ public class GeneratorService {
         if (g.getStatus() == GeneratorStatus.RUNNING || g.getStatus() == GeneratorStatus.RESERVED) {
             throw new ApiException(HttpStatus.CONFLICT, "Cannot delete reserved/running generator");
         }
+        tunnels.close(id);
         generators.delete(g);
         audit.record(actor, "GENERATOR_DELETE", "Generator", id.toString(), Map.of());
     }
@@ -128,7 +136,24 @@ public class GeneratorService {
         g.touch();
         generators.save(g);
         audit.record(actor, "GENERATOR_REPROVISION", "Generator", id.toString(), Map.of());
-        provisioning.provisionAsync(id);
+        scheduleProvisionAfterCommit(id);
+    }
+
+    /**
+     * Provisioning runs on another thread; start it only after the creating transaction commits
+     * so the async worker can see the new generator row.
+     */
+    private void scheduleProvisionAfterCommit(UUID generatorId) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    provisioning.provisionAsync(generatorId);
+                }
+            });
+        } else {
+            provisioning.provisionAsync(generatorId);
+        }
     }
 
     @Transactional

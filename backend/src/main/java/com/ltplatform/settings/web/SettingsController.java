@@ -22,6 +22,10 @@ public class SettingsController {
 
     @GetMapping
     public Map<String, Object> getAll() {
+        Map<String, Object> controller = new java.util.LinkedHashMap<>(settings.getPublic("controller"));
+        controller.putIfAbsent("advertiseHost", props.getControllerAdvertiseHost() == null
+                ? "" : props.getControllerAdvertiseHost());
+        controller.put("grpcPort", props.getGrpc().getPort());
         return Map.of(
                 "bitbucket", settings.getPublic("bitbucket"),
                 "storage", Map.of(
@@ -34,9 +38,16 @@ public class SettingsController {
                         "port", props.getGrpc().getPort(),
                         "certsDir", props.getGrpc().getCertsDir()
                 ),
+                "controller", controller,
                 "retention", settings.getPublic("retention"),
                 "jmeter", settings.getPublic("jmeter")
         );
+    }
+
+    @PutMapping("/controller")
+    public Map<String, Object> putController(@RequestBody Map<String, Object> body) {
+        settings.putMap("controller", body);
+        return settings.getPublic("controller");
     }
 
     @PutMapping("/bitbucket")

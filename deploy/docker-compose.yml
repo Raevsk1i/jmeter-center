@@ -42,7 +42,9 @@ services:
       LT_AGENT_BINARY: /data/agent/lt-agent
       LT_CERTS_DIR: /data/certs
       LT_GRPC_PORT: 9090
-      LT_CONTROLLER_HOST: controller
+      # Host/IP that SSH-provisioned agents dial for gRPC (must be reachable from generators).
+      # Use the Docker-host LAN/public IP for remote RHEL boxes; "controller" only works for Compose-network agents.
+      LT_CONTROLLER_HOST: ${LT_CONTROLLER_HOST:-}
       LT_ADMIN_PASSWORD: ${LT_ADMIN_PASSWORD:-admin}
     ports:
       - "8080:8080"

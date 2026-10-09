@@ -9,6 +9,13 @@ public class LtPlatformProperties {
     private String logRoot;
     private String jmeterBundlePath;
     private String agentBinaryPath;
+    /**
+     * Host/IP that remote agents use to reach this controller's gRPC port.
+     * Must be reachable from generator hosts (not the Docker service name unless agents
+     * share the same Compose network). Overridable via Settings → Controller advertise host.
+     */
+    private String controllerAdvertiseHost = "";
+    private int agentRegisterWaitSeconds = 90;
     private Grpc grpc = new Grpc();
     private int heartbeatTimeoutSeconds = 45;
     private DefaultAdmin defaultAdmin = new DefaultAdmin();
@@ -23,6 +30,14 @@ public class LtPlatformProperties {
     public void setJmeterBundlePath(String jmeterBundlePath) { this.jmeterBundlePath = jmeterBundlePath; }
     public String getAgentBinaryPath() { return agentBinaryPath; }
     public void setAgentBinaryPath(String agentBinaryPath) { this.agentBinaryPath = agentBinaryPath; }
+    public String getControllerAdvertiseHost() { return controllerAdvertiseHost; }
+    public void setControllerAdvertiseHost(String controllerAdvertiseHost) {
+        this.controllerAdvertiseHost = controllerAdvertiseHost;
+    }
+    public int getAgentRegisterWaitSeconds() { return agentRegisterWaitSeconds; }
+    public void setAgentRegisterWaitSeconds(int agentRegisterWaitSeconds) {
+        this.agentRegisterWaitSeconds = agentRegisterWaitSeconds;
+    }
     public Grpc getGrpc() { return grpc; }
     public void setGrpc(Grpc grpc) { this.grpc = grpc; }
     public int getHeartbeatTimeoutSeconds() { return heartbeatTimeoutSeconds; }

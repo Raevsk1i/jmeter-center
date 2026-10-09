@@ -173,7 +173,20 @@ docker compose --profile agents up --build -d agent-2
 
 ### 2.5. Агент на RHEL (systemd), не в Docker
 
-Controller умеет установить агент по SSH (Generators → Provision). Для ручной установки:
+Controller умеет установить агент по SSH (**Generators → Add Generator** с `provisionNow`) и **сам** запускает `lt-agent` через systemd, дожидаясь gRPC-регистрации.
+
+При SSH-provisioning Controller поднимает **SSH reverse tunnel**: агент на генераторе звонит на `127.0.0.1:19090`, а трафик приходит на gRPC Controller (`9090`). Открывать `9090` наружу для таких генераторов не обязательно; туннель держится, пока жив Controller.
+
+Для агентов без SSH (Compose profile `agents`) по-прежнему нужен доступный `LT_CONTROLLER`:
+
+```bash
+# в deploy/.env или окружении controller (для Docker-агентов / ручной установки):
+LT_CONTROLLER_HOST=<публичный_IP_или_DNS_хоста_с_controller>
+```
+
+Либо **Settings → Agent controller address** в UI.
+
+Для ручной установки:
 
 ```bash
 # На машине с Go или скопируйте бинарь из образа
