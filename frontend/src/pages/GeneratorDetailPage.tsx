@@ -19,7 +19,7 @@ export type GeneratorLog = {
   at: string;
 };
 
-const SOURCES = ['ALL', 'PROVISION', 'AGENT_CMD', 'AGENT_CONN'] as const;
+const SOURCES = ['ALL', 'PROVISION', 'AGENT_CMD', 'AGENT_CONN', 'ORCHESTRATION'] as const;
 
 function levelColor(level: string): 'default' | 'info' | 'warning' | 'error' | 'success' {
   switch (level) {
@@ -316,7 +316,7 @@ export function GeneratorDetailPage() {
             </Typography>
           )}
           <Typography variant="caption" color="text.secondary" sx={{ mb: 1 }}>
-            PROVISION — SSH bootstrap · AGENT_CMD — commands & agent replies · AGENT_CONN — session register/disconnect
+            PROVISION — SSH bootstrap · AGENT_CMD — commands & replies · AGENT_CONN — session · ORCHESTRATION — test launch
           </Typography>
 
           <Box sx={{

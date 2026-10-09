@@ -2,12 +2,20 @@ import {
   Alert, Box, Button, Chip, MenuItem, Stack, TextField, Typography, LinearProgress,
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link as RouterLink, useParams } from 'react-router-dom';
 import { api } from '../api/client';
 import type { Generator, TestRun } from '../api/client';
 
 type Test = { id: string; name: string; jmxPath: string };
+type RunEvent = {
+  id?: number;
+  eventType?: string;
+  message?: string;
+  at?: string;
+  generatorId?: string;
+  detail?: Record<string, unknown> | null;
+};
 
 export function ExecutionPage() {
   const { runId } = useParams();
@@ -31,10 +39,20 @@ export function ExecutionPage() {
     propertiesText: 'threads=10\nrampup=30',
   });
   const [liveLogs, setLiveLogs] = useState('');
+  const [consoleLogs, setConsoleLogs] = useState('');
+  const [logTab, setLogTab] = useState<'jmeter' | 'console'>('jmeter');
   const [error, setError] = useState('');
 
-  const activeRunId = runId || runs.find((r) => r.status === 'RUNNING' || r.status === 'PREPARING')?.id;
+  const activeRunId = runId || runs.find((r) => r.status === 'RUNNING' || r.status === 'PREPARING')?.id
+    || runs[0]?.id;
   const activeRun = runs.find((r) => r.id === activeRunId);
+
+  const { data: events = [] } = useQuery({
+    queryKey: ['run-events', activeRunId],
+    queryFn: () => api.get<RunEvent[]>(`/api/v1/runs/${activeRunId}/events`),
+    enabled: !!activeRunId,
+    refetchInterval: activeRun?.status === 'RUNNING' || activeRun?.status === 'PREPARING' ? 3000 : 8000,
+  });
 
   const start = useMutation({
     mutationFn: () => {
@@ -51,7 +69,10 @@ export function ExecutionPage() {
         startNow: true,
       });
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['runs'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['runs'] });
+      setError('');
+    },
     onError: (e: Error) => setError(e.message),
   });
 
@@ -61,37 +82,33 @@ export function ExecutionPage() {
   });
 
   useEffect(() => {
-    if (!activeRunId) return;
-    const es = new EventSource(
-      `${import.meta.env.VITE_API_BASE ?? 'http://localhost:8080'}/api/v1/runs/${activeRunId}/logs/stream`,
-      // EventSource cannot set Basic auth easily; polling fallback below
-    );
-    es.addEventListener('log', (ev) => {
-      try {
-        const data = JSON.parse((ev as MessageEvent).data);
-        setLiveLogs((prev) => (prev + data.text).slice(-20000));
-      } catch { /* ignore */ }
-    });
-    es.onerror = () => es.close();
+    if (!activeRunId || !activeRun?.masterGeneratorId) return;
     const poll = setInterval(async () => {
-      if (!activeRun?.masterGeneratorId) return;
       try {
-        const res = await api.get<{ content: string }>(
-          `/api/v1/runs/${activeRunId}/logs?generatorId=${activeRun.masterGeneratorId}&fromOffset=0&maxBytes=32000`,
-        );
-        if (res.content) setLiveLogs(res.content.slice(-20000));
+        const [jmeter, consoleOut] = await Promise.all([
+          api.get<{ content: string }>(
+            `/api/v1/runs/${activeRunId}/logs?generatorId=${activeRun.masterGeneratorId}&file=jmeter.log&fromOffset=0&maxBytes=48000`,
+          ),
+          api.get<{ content: string }>(
+            `/api/v1/runs/${activeRunId}/logs?generatorId=${activeRun.masterGeneratorId}&file=jmeter-console.log&fromOffset=0&maxBytes=48000`,
+          ),
+        ]);
+        if (jmeter.content) setLiveLogs(jmeter.content.slice(-24000));
+        if (consoleOut.content) setConsoleLogs(consoleOut.content.slice(-24000));
       } catch { /* ignore */ }
-    }, 4000);
-    return () => { es.close(); clearInterval(poll); };
+    }, 3000);
+    return () => clearInterval(poll);
   }, [activeRunId, activeRun?.masterGeneratorId]);
 
   const available = generators.filter((g) => g.status === 'AVAILABLE');
+  const timeline = useMemo(() => [...events].reverse(), [events]);
+  const logText = logTab === 'jmeter' ? liveLogs : consoleLogs;
 
   return (
     <Stack spacing={3}>
       <Box>
         <Typography variant="h4">Test Execution</Typography>
-        <Typography color="text.secondary">Select Master/Slaves, launch distributed JMeter, watch live status</Typography>
+        <Typography color="text.secondary">Select Master/Slaves, launch distributed JMeter, watch launch diagnostics</Typography>
       </Box>
 
       {error && <Alert severity="error">{error}</Alert>}
@@ -128,7 +145,11 @@ export function ExecutionPage() {
             <Typography variant="h6">Live Run</Typography>
             {activeRun && (
               <Stack direction="row" spacing={1}>
-                <Chip label={activeRun.status} color={activeRun.status === 'RUNNING' ? 'warning' : 'default'} />
+                <Chip label={activeRun.status} color={
+                  activeRun.status === 'RUNNING' ? 'warning'
+                    : activeRun.status === 'FAILED' ? 'error'
+                      : activeRun.status === 'COMPLETED' ? 'success' : 'default'
+                } />
                 {(activeRun.status === 'RUNNING' || activeRun.status === 'PREPARING') && (
                   <Button size="small" color="error" onClick={() => stop.mutate(activeRun.id)}>Stop</Button>
                 )}
@@ -142,12 +163,73 @@ export function ExecutionPage() {
               {activeRun.commitHash && <Typography variant="caption">Commit {activeRun.commitHash.slice(0, 12)}</Typography>}
               {(activeRun.status === 'PREPARING' || activeRun.status === 'RUNNING') && <LinearProgress />}
               {activeRun.errorMessage && <Alert severity="error">{activeRun.errorMessage}</Alert>}
+
+              <Typography variant="subtitle2" sx={{ mt: 1 }}>Launch timeline</Typography>
               <Box sx={{
-                mt: 1, p: 1.5, borderRadius: 1.5, bgcolor: 'rgba(0,0,0,0.35)', color: '#D7E2F2',
-                fontFamily: 'IBM Plex Mono, ui-monospace, monospace', fontSize: 12,
-                maxHeight: 320, overflow: 'auto', whiteSpace: 'pre-wrap',
+                maxHeight: 200, overflow: 'auto', p: 1.25,
+                borderRadius: 1.5, border: '1px solid', borderColor: 'divider',
               }}>
-                {liveLogs || 'Waiting for logs…'}
+                {timeline.length === 0 && (
+                  <Typography variant="caption" color="text.secondary">Waiting for orchestration events…</Typography>
+                )}
+                <Stack spacing={0.75}>
+                  {timeline.map((e, i) => (
+                    <Box key={e.id ?? i}>
+                      <Typography variant="caption" color="text.secondary" display="block">
+                        {e.at ? new Date(e.at).toLocaleTimeString() : ''}
+                        {e.generatorId ? ` · gen ${String(e.generatorId).slice(0, 8)}` : ''}
+                      </Typography>
+                      <Typography variant="body2">
+                        <Box component="span" sx={{ fontWeight: 600, fontFamily: 'IBM Plex Mono, monospace', mr: 0.75 }}>
+                          {e.eventType}
+                        </Box>
+                        {e.message}
+                      </Typography>
+                      {e.detail && (e.eventType === 'STATUS_POLL' || e.eventType === 'FINISH_CHECK'
+                        || e.eventType === 'MASTER_STARTED' || e.eventType === 'NEVER_STARTED') && (
+                        <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'IBM Plex Mono, monospace' }}>
+                          {[
+                            e.detail.pid != null ? `pid=${e.detail.pid}` : '',
+                            e.detail.exitCode != null ? `exit=${e.detail.exitCode}` : '',
+                            e.detail.jtlSamples != null ? `jtl=${e.detail.jtlSamples}` : '',
+                            e.detail.jmxPath != null ? `jmx=${String(e.detail.jmxPath).slice(-40)}` : '',
+                          ].filter(Boolean).join(' · ')}
+                        </Typography>
+                      )}
+                    </Box>
+                  ))}
+                </Stack>
+              </Box>
+
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Chip
+                  size="small"
+                  label="jmeter.log"
+                  color={logTab === 'jmeter' ? 'primary' : 'default'}
+                  onClick={() => setLogTab('jmeter')}
+                />
+                <Chip
+                  size="small"
+                  label="jmeter-console.log"
+                  color={logTab === 'console' ? 'primary' : 'default'}
+                  onClick={() => setLogTab('console')}
+                />
+                {activeRun.masterGeneratorId && (
+                  <Button
+                    component={RouterLink}
+                    to={`/generators/${activeRun.masterGeneratorId}`}
+                    size="small"
+                  >
+                    Master agent logs
+                  </Button>
+                )}
+              </Stack>
+              <Box sx={{
+                mt: 0.5, p: 1.5, borderRadius: 1.5, bgcolor: 'rgba(0,0,0,0.35)', color: '#D7E2F2',
+                fontFamily: 'IBM Plex Mono, ui-monospace, monospace', fontSize: 12,
+                maxHeight: 280, overflow: 'auto', whiteSpace: 'pre-wrap',
+              }}>
+                {logText || 'Waiting for agent log stream (starts after MASTER_STARTED)…'}
               </Box>
               <Button component={RouterLink} to={`/history/${activeRun.id}`} size="small">Open details</Button>
             </Stack>

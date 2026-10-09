@@ -8,6 +8,7 @@ import (
         "os"
         "path/filepath"
         "strconv"
+        "strings"
         "sync"
         "time"
 
@@ -123,7 +124,7 @@ func (c *Client) heartbeatLoop(ctx context.Context, stream agentv1.AgentControl_
                         return ctx.Err()
                 case <-t.C:
                         m := monitoring.Collect(c.cfg.JMeterHome)
-                        alive, _, _, _ := c.exec.Status("")
+                        alive, _, _, _, _ := c.exec.Status("")
                         status := "AVAILABLE"
                         var runID *string
                         if alive {
@@ -189,11 +190,12 @@ func (c *Client) handleCommand(stream agentv1.AgentControl_AgentSessionClient, c
         var err error
         switch x := cmd.Command.(type) {
         case *agentv1.CommandEnvelope_GetAgentStatus:
-                alive, pid, role, state := c.exec.Status(cmd.RunId)
+                alive, pid, role, state, exitCode := c.exec.Status(cmd.RunId)
                 result.Attributes["jmeterAlive"] = strconv.FormatBool(alive)
                 result.Attributes["pid"] = strconv.Itoa(pid)
                 result.Attributes["role"] = role
                 result.Attributes["state"] = state
+                result.Attributes["exitCode"] = strconv.Itoa(exitCode)
                 result.Message = "ok"
         case *agentv1.CommandEnvelope_GetSystemMetrics:
                 m := monitoring.Collect(c.cfg.JMeterHome)
@@ -202,13 +204,27 @@ func (c *Client) handleCommand(stream agentv1.AgentControl_AgentSessionClient, c
                 result.Attributes["diskFree"] = strconv.FormatInt(m.DiskFreeMB, 10)
                 result.Message = "ok"
         case *agentv1.CommandEnvelope_PrepareWorkspace:
-                err = artifacts.PrepareWorkspace(c.workspace(cmd.RunId, x.PrepareWorkspace.WorkspacePath))
+                ws := c.workspace(cmd.RunId, x.PrepareWorkspace.WorkspacePath)
+                err = artifacts.PrepareWorkspace(ws)
+                result.Attributes["workspace"] = ws
         case *agentv1.CommandEnvelope_SyncArtifacts:
+                ws := c.workspace(cmd.RunId, x.SyncArtifacts.WorkspacePath)
                 files := make([]artifacts.File, 0, len(x.SyncArtifacts.Files))
+                names := make([]string, 0, len(x.SyncArtifacts.Files))
+                var totalBytes int
                 for _, f := range x.SyncArtifacts.Files {
                         files = append(files, artifacts.File{RelativePath: f.RelativePath, SHA256: f.Sha256, Content: f.Content})
+                        names = append(names, f.RelativePath)
+                        totalBytes += len(f.Content)
                 }
-                err = artifacts.Sync(c.workspace(cmd.RunId, x.SyncArtifacts.WorkspacePath), files)
+                err = artifacts.Sync(ws, files)
+                result.Attributes["workspace"] = ws
+                result.Attributes["fileCount"] = strconv.Itoa(len(files))
+                result.Attributes["totalBytes"] = strconv.Itoa(totalBytes)
+                if len(names) > 0 {
+                        result.Attributes["files"] = strings.Join(names, ",")
+                }
+                result.Message = fmt.Sprintf("synced %d files (%d bytes) to %s", len(files), totalBytes, ws)
         case *agentv1.CommandEnvelope_VerifyEnvironment:
                 m := monitoring.Collect(c.cfg.JMeterHome)
                 if m.JavaVer == "" {
@@ -216,24 +232,60 @@ func (c *Client) handleCommand(stream agentv1.AgentControl_AgentSessionClient, c
                 } else {
                         result.Attributes["java"] = m.JavaVer
                         result.Attributes["jmeter"] = m.JMeterVer
+                        result.Attributes["jmeterHome"] = c.cfg.JMeterHome
                         result.Message = "environment ok"
                 }
         case *agentv1.CommandEnvelope_StartJmeterServer:
-                err = c.exec.StartServer(cmd.RunId, c.workspace(cmd.RunId, x.StartJmeterServer.WorkspacePath),
+                ws := c.workspace(cmd.RunId, x.StartJmeterServer.WorkspacePath)
+                var pid int
+                var argv []string
+                pid, argv, err = c.exec.StartServer(cmd.RunId, ws,
                         int(x.StartJmeterServer.RmiPort), int(x.StartJmeterServer.LocalPort),
                         x.StartJmeterServer.ExtraClasspath, c.cfg.StateDir)
+                if err == nil {
+                        result.Attributes["pid"] = strconv.Itoa(pid)
+                        result.Attributes["workspace"] = ws
+                        result.Attributes["rmiPort"] = strconv.Itoa(int(x.StartJmeterServer.RmiPort))
+                        result.Attributes["argv"] = strings.Join(argv, " ")
+                        result.Message = fmt.Sprintf("jmeter-server started pid=%d", pid)
+                }
         case *agentv1.CommandEnvelope_StartJmeterTest:
-                err = c.exec.StartTest(cmd.RunId, c.workspace(cmd.RunId, x.StartJmeterTest.WorkspacePath), x.StartJmeterTest.JmxPath,
+                ws := c.workspace(cmd.RunId, x.StartJmeterTest.WorkspacePath)
+                var pid int
+                var argv []string
+                pid, argv, err = c.exec.StartTest(cmd.RunId, ws, x.StartJmeterTest.JmxPath,
                         x.StartJmeterTest.RemoteHosts, x.StartJmeterTest.Properties, int(x.StartJmeterTest.RmiPort), c.cfg.StateDir)
+                if err == nil {
+                        result.Attributes["pid"] = strconv.Itoa(pid)
+                        result.Attributes["workspace"] = ws
+                        result.Attributes["jmxPath"] = filepath.Join(ws, x.StartJmeterTest.JmxPath)
+                        result.Attributes["remoteHosts"] = strings.Join(x.StartJmeterTest.RemoteHosts, ",")
+                        result.Attributes["propertyCount"] = strconv.Itoa(len(x.StartJmeterTest.Properties))
+                        result.Attributes["argv"] = strings.Join(argv, " ")
+                        result.Message = fmt.Sprintf("jmeter started pid=%d jmx=%s", pid, x.StartJmeterTest.JmxPath)
+                        log.Printf("StartJMeterTest pid=%d argv=%v", pid, argv)
+                }
         case *agentv1.CommandEnvelope_StopJmeter:
                 err = c.exec.Stop(x.StopJmeter.Force)
         case *agentv1.CommandEnvelope_GetExecutionStatus:
-                alive, pid, role, state := c.exec.Status(x.GetExecutionStatus.RunId)
+                alive, pid, role, state, exitCode := c.exec.Status(x.GetExecutionStatus.RunId)
                 result.Attributes["jmeterAlive"] = strconv.FormatBool(alive)
                 result.Attributes["pid"] = strconv.Itoa(pid)
                 result.Attributes["role"] = role
                 result.Attributes["state"] = state
-                result.Message = "ok"
+                result.Attributes["exitCode"] = strconv.Itoa(exitCode)
+                ws := c.workspace(x.GetExecutionStatus.RunId, "")
+                result.Attributes["workspace"] = ws
+                jtlPath := filepath.Join(ws, "results.jtl")
+                samples, jtlBytes, jtlErr := countJtlSamples(jtlPath)
+                result.Attributes["jtlSamples"] = strconv.Itoa(samples)
+                result.Attributes["jtlBytes"] = strconv.FormatInt(jtlBytes, 10)
+                if jtlErr != nil {
+                        result.Attributes["jtlError"] = jtlErr.Error()
+                }
+                result.Attributes["jmeterLogTail"] = tailFile(filepath.Join(ws, "jmeter.log"), 60)
+                result.Attributes["consoleLogTail"] = tailFile(filepath.Join(ws, "jmeter-console.log"), 40)
+                result.Message = fmt.Sprintf("state=%s alive=%v exit=%d jtlSamples=%d", state, alive, exitCode, samples)
         case *agentv1.CommandEnvelope_StreamLogs:
                 go c.streamLogs(stream, cmd.RunId, x.StreamLogs)
                 result.Message = "streaming"
@@ -275,11 +327,51 @@ func (c *Client) streamLogs(stream agentv1.AgentControl_AgentSessionClient, runI
                 } else {
                         time.Sleep(500 * time.Millisecond)
                 }
-                alive, _, _, _ := c.exec.Status(runID)
+                alive, _, _, _, _ := c.exec.Status(runID)
                 if !alive && eof {
                         return
                 }
         }
+}
+
+func countJtlSamples(path string) (int, int64, error) {
+        st, err := os.Stat(path)
+        if err != nil {
+                return 0, 0, err
+        }
+        data, err := os.ReadFile(path)
+        if err != nil {
+                return 0, st.Size(), err
+        }
+        lines := 0
+        for _, line := range strings.Split(string(data), "\n") {
+                trimmed := strings.TrimSpace(line)
+                if trimmed == "" {
+                        continue
+                }
+                // skip CSV header
+                if strings.HasPrefix(trimmed, "timeStamp") || strings.HasPrefix(trimmed, "<?xml") {
+                        continue
+                }
+                lines++
+        }
+        return lines, st.Size(), nil
+}
+
+func tailFile(path string, maxLines int) string {
+        data, err := os.ReadFile(path)
+        if err != nil {
+                return ""
+        }
+        lines := strings.Split(string(data), "\n")
+        if len(lines) > maxLines {
+                lines = lines[len(lines)-maxLines:]
+        }
+        out := strings.Join(lines, "\n")
+        if len(out) > 4000 {
+                return out[len(out)-4000:]
+        }
+        return out
 }
 
 func (c *Client) workspace(runID, requested string) string {

@@ -14,6 +14,7 @@ import com.ltplatform.executionhistory.repo.TestRunRepository;
 import com.ltplatform.executionhistory.service.ExecutionEventService;
 import com.ltplatform.generator.domain.Generator;
 import com.ltplatform.generator.repo.GeneratorRepository;
+import com.ltplatform.generator.service.GeneratorLogService;
 import com.ltplatform.orchestration.service.ArtifactPackageService.PackagedArtifact;
 import com.ltplatform.reservation.domain.GeneratorRole;
 import com.ltplatform.reservation.service.ReservationService;
@@ -26,6 +27,7 @@ import com.ltplatform.testmanagement.service.TestManagementService;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -51,6 +53,7 @@ public class TestOrchestrator {
     private final AgentCommandService commands;
     private final ExecutionEventService events;
     private final GeneratorRepository generators;
+    private final GeneratorLogService genLogs;
     private final SettingsService settings;
     private final ObjectMapper mapper;
     private final OrchestrationLauncher launcher;
@@ -65,6 +68,7 @@ public class TestOrchestrator {
             AgentCommandService commands,
             ExecutionEventService events,
             GeneratorRepository generators,
+            GeneratorLogService genLogs,
             SettingsService settings,
             ObjectMapper mapper,
             @org.springframework.context.annotation.Lazy OrchestrationLauncher launcher
@@ -78,6 +82,7 @@ public class TestOrchestrator {
         this.commands = commands;
         this.events = events;
         this.generators = generators;
+        this.genLogs = genLogs;
         this.settings = settings;
         this.mapper = mapper;
         this.launcher = launcher;
@@ -188,10 +193,15 @@ public class TestOrchestrator {
         } catch (ApiException e) {
             transition(run, TestRunStatus.FAILED, e.getMessage().contains("AVAILABLE") || e.getMessage().contains("reserved")
                     ? "RESOURCES_UNAVAILABLE: " + e.getMessage() : e.getMessage());
+            events.emit(runId, null, "TestRun", runId.toString(), "RESERVE_FAILED", e.getMessage(), null);
             return;
         }
-        events.emit(runId, null, "TestRun", runId.toString(), "RESERVED", "Generators reserved",
-                Map.of("count", reserved.size()));
+        events.emit(runId, null, "TestRun", runId.toString(), "RESERVED",
+                "Generators reserved: master=" + shortId(masterId) + " slaves=" + slaves.size(),
+                Map.of("count", reserved.size(), "masterGeneratorId", masterId.toString(),
+                        "slaveGeneratorIds", slaves.stream().map(UUID::toString).toList()));
+        orchLog(masterId, runId, "RESERVED",
+                "Reserved master + " + slaves.size() + " slave(s) for run");
 
         TestDefinition def = tests.requireTest(run.getTestDefinitionId());
         SystemEntity system = tests.requireSystem(def.getSystemId());
@@ -202,28 +212,75 @@ public class TestOrchestrator {
         String testRoot = def.getJmxPath().contains("/")
                 ? def.getJmxPath().substring(0, def.getJmxPath().indexOf('/'))
                 : (def.getTestType().name().equals("STABILITY") ? "stability_test" : "perf_test");
-        // if jmxPath is like perf_test/test.jmx
         if (def.getJmxPath().contains("/")) {
             testRoot = def.getJmxPath().substring(0, def.getJmxPath().indexOf('/'));
         }
 
+        String jmxRelative = def.getJmxPath().contains("/")
+                ? def.getJmxPath().substring(def.getJmxPath().indexOf('/') + 1)
+                : "test.jmx";
+
         List<PackagedArtifact> packaged = artifacts.buildPackage(runId, commit, testRoot);
-        events.emit(runId, null, "TestRun", runId.toString(), "ARTIFACTS", "Package built",
-                Map.of("files", packaged.size(), "commit", commit));
+        List<String> fileNames = packaged.stream().map(PackagedArtifact::relativePath).toList();
+        long totalBytes = packaged.stream().mapToLong(a -> a.content() != null ? a.content().length : 0).sum();
+        boolean jmxInPackage = packaged.stream().anyMatch(a ->
+                a.relativePath().equals(jmxRelative) || a.relativePath().endsWith("/" + jmxRelative));
+        Map<String, Object> artifactDetail = new LinkedHashMap<>();
+        artifactDetail.put("files", packaged.size());
+        artifactDetail.put("totalBytes", totalBytes);
+        artifactDetail.put("commit", commit);
+        artifactDetail.put("testRoot", testRoot);
+        artifactDetail.put("jmxPath", def.getJmxPath());
+        artifactDetail.put("jmxRelative", jmxRelative);
+        artifactDetail.put("jmxInPackage", jmxInPackage);
+        artifactDetail.put("names", fileNames);
+        events.emit(runId, null, "TestRun", runId.toString(), "ARTIFACTS",
+                "Package built: " + packaged.size() + " files, " + totalBytes + " bytes"
+                        + (jmxInPackage ? "; jmx OK" : "; WARNING jmx missing: " + jmxRelative),
+                artifactDetail);
+        orchLog(masterId, runId, "ARTIFACTS",
+                "Package " + packaged.size() + " files (" + totalBytes + " B) commit=" + shortId(commit)
+                        + " jmx=" + jmxRelative + (jmxInPackage ? " present" : " MISSING"));
+        if (!jmxInPackage) {
+            throw new IllegalStateException("JMX not in artifact package: " + jmxRelative
+                    + " (files=" + fileNames + ")");
+        }
 
         String workspace = "/var/lib/lt-agent/workspaces/" + runId;
         Map<UUID, Long> tokens = new HashMap<>();
         reserved.forEach(r -> tokens.put(r.generatorId(), r.fencingToken()));
 
         for (ReservationResult r : reserved) {
+            String role = r.role().name();
             CommandOutcome prep = commands.prepareWorkspace(r.generatorId(), runId.toString(), r.fencingToken(), workspace);
-            if (!prep.success()) throw new IllegalStateException("Prepare failed on " + r.generatorId() + ": " + prep.message());
+            emitCmd(runId, r.generatorId(), "PREPARE", prep);
+            if (!prep.success()) {
+                throw new IllegalStateException("Prepare failed on " + r.generatorId() + ": " + prep.message());
+            }
             CommandOutcome sync = commands.syncArtifacts(r.generatorId(), runId.toString(), r.fencingToken(), workspace,
                     artifacts.toProto(packaged));
-            if (!sync.success()) throw new IllegalStateException("Sync failed on " + r.generatorId() + ": " + sync.message());
+            emitCmd(runId, r.generatorId(), "SYNC", sync);
+            if (!sync.success()) {
+                throw new IllegalStateException("Sync failed on " + r.generatorId() + ": " + sync.message());
+            }
             CommandOutcome verify = commands.verifyEnvironment(r.generatorId(), runId.toString(), r.fencingToken());
-            if (!verify.success()) throw new IllegalStateException("Verify failed on " + r.generatorId() + ": " + verify.message());
-            events.emit(runId, r.generatorId(), "Generator", r.generatorId().toString(), "READY", "Agent ready", null);
+            emitCmd(runId, r.generatorId(), "VERIFY", verify);
+            if (!verify.success()) {
+                throw new IllegalStateException("Verify failed on " + r.generatorId() + ": " + verify.message());
+            }
+            Map<String, Object> readyDetail = new LinkedHashMap<>();
+            readyDetail.put("role", role);
+            readyDetail.put("workspace", sync.attributes().getOrDefault("workspace", workspace));
+            readyDetail.put("fileCount", sync.attributes().getOrDefault("fileCount", String.valueOf(packaged.size())));
+            readyDetail.put("java", verify.attributes().getOrDefault("java", ""));
+            readyDetail.put("jmeter", verify.attributes().getOrDefault("jmeter", ""));
+            readyDetail.put("jmeterHome", verify.attributes().getOrDefault("jmeterHome", ""));
+            events.emit(runId, r.generatorId(), "Generator", r.generatorId().toString(), "READY",
+                    role + " agent ready (java=" + readyDetail.get("java") + ", jmeter=" + readyDetail.get("jmeter") + ")",
+                    readyDetail);
+            orchLog(r.generatorId(), runId, "READY",
+                    role + " ready workspace=" + readyDetail.get("workspace")
+                            + " files=" + readyDetail.get("fileCount"));
         }
 
         Map<String, Object> jmeterSettings = settings.getMap("jmeter");
@@ -237,30 +294,66 @@ public class TestOrchestrator {
                 remoteHosts.add(g.getHostname() + ":" + rmiPort);
                 CommandOutcome startServer = commands.startServer(
                         r.generatorId(), runId.toString(), r.fencingToken(), workspace, rmiPort, localPort, List.of());
+                emitCmd(runId, r.generatorId(), "START_SERVER", startServer);
                 if (!startServer.success()) {
                     throw new IllegalStateException("JMeter server start failed on " + r.generatorId() + ": " + startServer.message());
                 }
+                events.emit(runId, r.generatorId(), "Generator", r.generatorId().toString(), "SLAVE_STARTED",
+                        "jmeter-server pid=" + startServer.attributes().getOrDefault("pid", "?")
+                                + " host=" + g.getHostname() + ":" + rmiPort,
+                        attrsAsMap(startServer.attributes()));
+                commands.requestLogStream(r.generatorId(), runId.toString(), r.fencingToken(), 0, "jmeter.log");
             }
         }
 
         @SuppressWarnings("unchecked")
         Map<String, String> properties = (Map<String, String>) config.getOrDefault("properties", Map.of());
-        String jmxRelative = def.getJmxPath().contains("/")
-                ? def.getJmxPath().substring(def.getJmxPath().indexOf('/') + 1)
-                : "test.jmx";
+
+        Map<String, Object> startPlan = new LinkedHashMap<>();
+        startPlan.put("jmxRelative", jmxRelative);
+        startPlan.put("workspace", workspace);
+        startPlan.put("remoteHosts", remoteHosts);
+        startPlan.put("properties", properties);
+        startPlan.put("rmiPort", rmiPort);
+        events.emit(runId, masterId, "TestRun", runId.toString(), "START_TEST",
+                "Starting JMeter master jmx=" + jmxRelative + " remotes=" + remoteHosts.size(),
+                startPlan);
+        orchLog(masterId, runId, "START_TEST",
+                "StartJMeterTest jmx=" + jmxRelative + " remotes=" + remoteHosts + " props=" + properties.size());
 
         CommandOutcome startTest = commands.startTest(
                 masterId, runId.toString(), tokens.get(masterId), workspace, jmxRelative, remoteHosts, properties, rmiPort);
+        emitCmd(runId, masterId, "START_TEST", startTest);
         if (!startTest.success()) {
             throw new IllegalStateException("JMeter test start failed: " + startTest.message());
         }
 
+        Map<String, Object> startedDetail = attrsAsMap(startTest.attributes());
+        startedDetail.put("jmxRelative", jmxRelative);
+        startedDetail.put("remoteHosts", remoteHosts);
+        events.emit(runId, masterId, "TestRun", runId.toString(), "MASTER_STARTED",
+                "JMeter started pid=" + startTest.attributes().getOrDefault("pid", "?")
+                        + " argv=" + truncate(startTest.attributes().getOrDefault("argv", ""), 300),
+                startedDetail);
+        orchLog(masterId, runId, "MASTER_STARTED",
+                "pid=" + startTest.attributes().getOrDefault("pid", "?")
+                        + " jmx=" + startTest.attributes().getOrDefault("jmxPath", jmxRelative)
+                        + " argv=" + truncate(startTest.attributes().getOrDefault("argv", ""), 400));
+
+        // Pull jmeter.log + console output into controller log storage for the Live Run panel.
+        commands.requestLogStream(masterId, runId.toString(), tokens.get(masterId), 0, "jmeter.log");
+        commands.requestLogStream(masterId, runId.toString(), tokens.get(masterId), 0, "jmeter-console.log");
+
         reservations.markRunning(runId);
         run.setStartedAt(Instant.now());
         transition(run, TestRunStatus.RUNNING);
-        events.emit(runId, masterId, "TestRun", runId.toString(), "RUNNING", "Distributed test started", null);
+        events.emit(runId, masterId, "TestRun", runId.toString(), "RUNNING",
+                "Distributed test running; streaming agent logs",
+                Map.of("pid", startTest.attributes().getOrDefault("pid", "")));
 
-        // Poll master execution status until complete
+        Map<String, String> lastAttrs = new LinkedHashMap<>(startTest.attributes());
+        int pollCount = 0;
+        boolean sawRunning = false;
         while (true) {
             TestRun current = runs.findById(runId).orElseThrow();
             if (current.getStatus() == TestRunStatus.CANCELLED) {
@@ -268,17 +361,76 @@ public class TestOrchestrator {
                 return;
             }
             CommandOutcome status = commands.getExecutionStatus(masterId, runId.toString(), tokens.get(masterId));
-            boolean alive = Boolean.parseBoolean(status.attributes().getOrDefault("jmeterAlive", "true"));
-            if (!alive || "COMPLETED".equalsIgnoreCase(status.attributes().getOrDefault("state", ""))) {
+            lastAttrs = status.attributes() != null ? new LinkedHashMap<>(status.attributes()) : new LinkedHashMap<>();
+            boolean alive = Boolean.parseBoolean(lastAttrs.getOrDefault("jmeterAlive", "false"));
+            String state = lastAttrs.getOrDefault("state", "UNKNOWN");
+            if ("RUNNING".equalsIgnoreCase(state) || alive) {
+                sawRunning = true;
+            }
+            pollCount++;
+            if (pollCount == 1 || pollCount % 3 == 0 || !alive || !"RUNNING".equalsIgnoreCase(state)) {
+                Map<String, Object> pollDetail = attrsAsMap(lastAttrs);
+                pollDetail.put("poll", pollCount);
+                pollDetail.put("sawRunning", sawRunning);
+                String pollMsg = "Poll #" + pollCount
+                        + " state=" + state
+                        + " alive=" + alive
+                        + " exit=" + lastAttrs.getOrDefault("exitCode", "?")
+                        + " jtlSamples=" + lastAttrs.getOrDefault("jtlSamples", "?")
+                        + " jtlBytes=" + lastAttrs.getOrDefault("jtlBytes", "?");
+                events.emit(runId, masterId, "TestRun", runId.toString(), "STATUS_POLL", pollMsg, pollDetail);
+                orchLog(masterId, runId, "STATUS_POLL", pollMsg);
+            }
+            if ("FAILED".equalsIgnoreCase(state) || "COMPLETED".equalsIgnoreCase(state)) {
                 break;
             }
             if (!status.success() && status.message() != null && status.message().contains("not found")) {
+                events.emit(runId, masterId, "TestRun", runId.toString(), "STATUS_ERROR",
+                        "GetExecutionStatus failed: " + status.message(), attrsAsMap(lastAttrs));
                 break;
+            }
+            if ("IDLE".equalsIgnoreCase(state) && !sawRunning && pollCount >= 4) {
+                Map<String, Object> idleDetail = attrsAsMap(lastAttrs);
+                events.emit(runId, masterId, "TestRun", runId.toString(), "NEVER_STARTED",
+                        "JMeter still IDLE after " + pollCount + " polls — process never reported RUNNING",
+                        idleDetail);
+                cleanupAndComplete(runId, tokens, workspace, TestRunStatus.FAILED,
+                        "JMeter never started (IDLE after " + pollCount + " status polls). "
+                                + "Check agent StartJMeterTest result and jmeter-console.log.");
+                return;
             }
             Thread.sleep(5000);
         }
 
-        cleanupAndComplete(runId, tokens, workspace, TestRunStatus.COMPLETED, null);
+        int exitCode = parseInt(lastAttrs.get("exitCode"), 0);
+        int jtlSamples = parseInt(lastAttrs.get("jtlSamples"), -1);
+        long jtlBytes = parseLong(lastAttrs.get("jtlBytes"), -1);
+        Map<String, Object> finishDetail = attrsAsMap(lastAttrs);
+        finishDetail.put("sawRunning", sawRunning);
+        finishDetail.put("pollCount", pollCount);
+
+        TestRunStatus terminal = TestRunStatus.COMPLETED;
+        String terminalMsg = null;
+        if (exitCode != 0 || "FAILED".equalsIgnoreCase(lastAttrs.getOrDefault("state", ""))) {
+            terminal = TestRunStatus.FAILED;
+            terminalMsg = "JMeter exited with code " + exitCode
+                    + (lastAttrs.containsKey("jtlError") ? "; jtl=" + lastAttrs.get("jtlError") : "");
+        } else if (jtlSamples == 0 || (jtlSamples < 0 && jtlBytes <= 0)) {
+            terminal = TestRunStatus.FAILED;
+            terminalMsg = "JMeter finished with exit=0 but results.jtl has 0 samples "
+                    + "(bytes=" + jtlBytes + ") — configured requests were not recorded. "
+                    + "Inspect STATUS_POLL / jmeterLogTail and agent console log.";
+        }
+
+        events.emit(runId, masterId, "TestRun", runId.toString(), "FINISH_CHECK",
+                "exit=" + exitCode + " jtlSamples=" + jtlSamples + " jtlBytes=" + jtlBytes
+                        + " → " + terminal.name(),
+                finishDetail);
+        orchLog(masterId, runId, "FINISH_CHECK",
+                "exit=" + exitCode + " jtlSamples=" + jtlSamples + " → " + terminal.name()
+                        + (terminalMsg != null ? " (" + terminalMsg + ")" : ""));
+
+        cleanupAndComplete(runId, tokens, workspace, terminal, terminalMsg);
     }
 
     @Transactional
@@ -318,8 +470,80 @@ public class TestOrchestrator {
         runs.findById(runId).ifPresent(run -> {
             run.setFinishedAt(Instant.now());
             transition(run, terminal, error);
-            events.emit(runId, null, "TestRun", runId.toString(), terminal.name(), "Run finished", null);
+            Map<String, Object> detail = new LinkedHashMap<>();
+            if (error != null) detail.put("error", error);
+            detail.put("status", terminal.name());
+            events.emit(runId, null, "TestRun", runId.toString(), terminal.name(),
+                    error != null ? error : "Run finished", detail);
+            if (run.getMasterGeneratorId() != null) {
+                orchLog(run.getMasterGeneratorId(), runId, terminal.name(),
+                        error != null ? error : "Run finished as " + terminal.name());
+            }
         });
+    }
+
+    private void emitCmd(UUID runId, UUID generatorId, String eventType, CommandOutcome outcome) {
+        Map<String, Object> detail = attrsAsMap(outcome.attributes());
+        detail.put("success", outcome.success());
+        detail.put("message", outcome.message());
+        events.emit(runId, generatorId, "Generator", generatorId.toString(), eventType,
+                (outcome.success() ? "OK " : "FAIL ") + eventType
+                        + (outcome.message() != null && !outcome.message().isBlank()
+                        ? ": " + truncate(outcome.message(), 300) : ""),
+                detail);
+    }
+
+    private void orchLog(UUID generatorId, UUID runId, String eventType, String message) {
+        if (generatorId == null) return;
+        genLogs.append(generatorId, "ORCHESTRATION", "INFO", eventType,
+                "[run " + shortId(runId.toString()) + "] " + message,
+                Map.of("runId", runId.toString()));
+    }
+
+    private static Map<String, Object> attrsAsMap(Map<String, String> attrs) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (attrs == null) return out;
+        // Keep tails but cap extreme size in event JSON
+        attrs.forEach((k, v) -> {
+            if (v != null && (k.endsWith("Tail") || "argv".equals(k)) && v.length() > 3500) {
+                out.put(k, v.substring(v.length() - 3500));
+            } else {
+                out.put(k, v);
+            }
+        });
+        return out;
+    }
+
+    private static int parseInt(String v, int def) {
+        if (v == null || v.isBlank()) return def;
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (NumberFormatException e) {
+            return def;
+        }
+    }
+
+    private static long parseLong(String v, long def) {
+        if (v == null || v.isBlank()) return def;
+        try {
+            return Long.parseLong(v.trim());
+        } catch (NumberFormatException e) {
+            return def;
+        }
+    }
+
+    private static String shortId(UUID id) {
+        return id == null ? "" : shortId(id.toString());
+    }
+
+    private static String shortId(String id) {
+        if (id == null) return "";
+        return id.length() > 8 ? id.substring(0, 8) : id;
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) return "";
+        return s.length() <= max ? s : s.substring(0, max) + "…";
     }
 
     private void fail(UUID runId, String message) {
