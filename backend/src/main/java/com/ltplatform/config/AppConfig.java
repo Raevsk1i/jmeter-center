@@ -1,7 +1,5 @@
 package com.ltplatform.config;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -12,13 +10,6 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 @Configuration
 @EnableConfigurationProperties(LtPlatformProperties.class)
 public class AppConfig {
-
-    @Bean
-    ObjectMapper objectMapper() {
-        ObjectMapper mapper = new ObjectMapper();
-        mapper.registerModule(new JavaTimeModule());
-        return mapper;
-    }
 
     @Bean(name = "orchestrationExecutor")
     ThreadPoolTaskExecutor orchestrationExecutor() {
