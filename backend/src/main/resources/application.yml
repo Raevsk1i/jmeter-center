@@ -1,0 +1,61 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: lt-controller
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:ltplatform}
+    username: ${DB_USER:ltplatform}
+    password: ${DB_PASSWORD:ltplatform}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  quartz:
+    job-store-type: jdbc
+    jdbc:
+      initialize-schema: always
+    properties:
+      org.quartz.scheduler.instanceName: LtScheduler
+      org.quartz.scheduler.instanceId: AUTO
+      org.quartz.jobStore.isClustered: true
+      org.quartz.jobStore.driverDelegateClass: org.quartz.impl.jdbcjobstore.PostgreSQLDelegate
+
+ltplatform:
+  master-key: ${LT_MASTER_KEY:0123456789abcdef0123456789abcdef}
+  artifact-root: ${LT_ARTIFACT_ROOT:./data/artifacts}
+  log-root: ${LT_LOG_ROOT:./data/logs}
+  jmeter-bundle-path: ${LT_JMETER_BUNDLE:./data/jmeter}
+  agent-binary-path: ${LT_AGENT_BINARY:./data/agent/lt-agent}
+  grpc:
+    port: ${LT_GRPC_PORT:9090}
+    certs-dir: ${LT_CERTS_DIR:./data/certs}
+  heartbeat-timeout-seconds: 45
+  default-admin:
+    username: admin
+    password: ${LT_ADMIN_PASSWORD:admin}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+
+logging:
+  level:
+    com.ltplatform: INFO
+    org.hibernate.SQL: WARN
+
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html

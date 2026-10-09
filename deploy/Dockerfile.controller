@@ -1,0 +1,16 @@
+FROM eclipse-temurin:21-jdk-jammy AS build
+WORKDIR /src
+COPY backend /src/backend
+COPY proto /src/proto
+WORKDIR /src/backend
+RUN apt-get update && apt-get install -y unzip curl && \
+    curl -sL https://services.gradle.org/distributions/gradle-8.10.2-bin.zip -o /tmp/gradle.zip && \
+    unzip -q /tmp/gradle.zip -d /opt && \
+    /opt/gradle-8.10.2/bin/gradle bootJar --no-daemon
+
+FROM eclipse-temurin:21-jre-jammy
+WORKDIR /app
+COPY --from=build /src/backend/build/libs/lt-controller.jar /app/lt-controller.jar
+RUN mkdir -p /data/artifacts /data/logs /data/certs /data/jmeter /data/agent
+EXPOSE 8080 9090
+ENTRYPOINT ["java", "-jar", "/app/lt-controller.jar"]

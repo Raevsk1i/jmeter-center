@@ -1,0 +1,16 @@
+FROM golang:1.22-bookworm AS build
+WORKDIR /src
+COPY agent /src/agent
+COPY proto /src/proto
+WORKDIR /src/agent
+RUN go build -o /lt-agent ./cmd/agent
+
+FROM eclipse-temurin:21-jdk-jammy
+# Placeholder JMeter layout for E2E; mount real distribution in production
+RUN mkdir -p /opt/lt-jmeter/bin /var/lib/lt-agent/workspaces /var/lib/lt-agent/state /var/log/lt-agent && \
+    printf '#!/bin/sh\necho "Apache JMeter 5.6 stub"\n' > /opt/lt-jmeter/bin/jmeter && \
+    printf '#!/bin/sh\necho "jmeter-server stub"; sleep infinity\n' > /opt/lt-jmeter/bin/jmeter-server && \
+    chmod +x /opt/lt-jmeter/bin/jmeter /opt/lt-jmeter/bin/jmeter-server
+COPY --from=build /lt-agent /opt/lt-agent/lt-agent
+ENV LT_JMETER_HOME=/opt/lt-jmeter
+ENTRYPOINT ["/opt/lt-agent/lt-agent"]
