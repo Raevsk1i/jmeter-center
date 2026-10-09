@@ -10,6 +10,7 @@ import com.ltplatform.generator.dto.GeneratorDtos.ProvisionStepResponse;
 import com.ltplatform.generator.repo.GeneratorRepository;
 import com.ltplatform.generator.repo.SshCredentialRepository;
 import com.ltplatform.generator.service.GeneratorLogService;
+import com.ltplatform.provisioning.ssh.SshAgentTunnelService;
 import com.ltplatform.provisioning.ssh.SshClientFactory;
 import com.ltplatform.settings.service.SettingsService;
 import java.net.Inet4Address;
@@ -45,6 +46,7 @@ public class ProvisioningService {
     private final GeneratorLogService genLogs;
     private final SettingsService settings;
     private final AgentSessionRegistry sessions;
+    private final SshAgentTunnelService tunnels;
 
     public ProvisioningService(
             GeneratorRepository generators,
@@ -54,7 +56,8 @@ public class ProvisioningService {
             JdbcTemplate jdbc,
             GeneratorLogService genLogs,
             SettingsService settings,
-            AgentSessionRegistry sessions
+            AgentSessionRegistry sessions,
+            SshAgentTunnelService tunnels
     ) {
         this.generators = generators;
         this.credentials = credentials;
@@ -64,6 +67,7 @@ public class ProvisioningService {
         this.genLogs = genLogs;
         this.settings = settings;
         this.sessions = sessions;
+        this.tunnels = tunnels;
     }
 
     @Async("orchestrationExecutor")
@@ -86,16 +90,26 @@ public class ProvisioningService {
         genLogs.info(generatorId, "PROVISION", "START",
                 "Provisioning started for " + g.getHostname() + ":" + g.getSshPort() + " as " + g.getSshUser());
 
+        // Prefer SSH reverse-tunnel so agents register without a publicly reachable controller.
+        // Fallback advertise host is still logged for operators who expose gRPC directly.
         String advertiseHost = resolveControllerAdvertiseHost();
         int grpcPort = props.getGrpc().getPort();
-        String controllerAddr = advertiseHost + ":" + grpcPort;
         genLogs.info(generatorId, "PROVISION", "CONTROLLER",
-                "Remote agent will dial gRPC " + controllerAddr);
+                "Public advertise candidate " + advertiseHost + ":" + grpcPort
+                        + " (SSH provision uses reverse tunnel 127.0.0.1:"
+                        + SshAgentTunnelService.REMOTE_FORWARD_PORT + " → controller :" + grpcPort + ")");
 
-        try (SSHClient client = ssh.connect(g.getHostname(), g.getSshPort(), g.getSshUser(), cred)) {
+        SSHClient client = null;
+        boolean keepTunnel = false;
+        try {
+            var opened = tunnels.open(generatorId, g.getHostname(), g.getSshPort(), g.getSshUser(), cred);
+            client = opened.client();
+            String controllerAddr = opened.agentControllerAddr();
             credentials.save(cred);
-            runStep(g, "CONNECT", "SSH connected");
-            genLogs.info(generatorId, "PROVISION", "CONNECT", "SSH connection established");
+            runStep(g, "CONNECT", "SSH connected + reverse tunnel " + controllerAddr);
+            genLogs.info(generatorId, "PROVISION", "CONNECT",
+                    "SSH connection established; agent will dial " + controllerAddr
+                            + " (tunneled to controller gRPC " + grpcPort + ")");
 
             var os = execLogged(client, generatorId, "DETECT_OS",
                     "cat /etc/os-release | head -5; uname -m; id; sudo -n true 2>/dev/null; echo SUDO:$?", 30);
@@ -223,21 +237,26 @@ public class ProvisioningService {
                 String journal = execLogged(client, generatorId, "REGISTER_WAIT",
                         "sudo journalctl -u lt-agent -n 100 --no-pager || true", 30).stdout();
                 genLogs.error(generatorId, "PROVISION", "REGISTER_WAIT",
-                        "Agent did not register within timeout. Check LT_CONTROLLER=" + controllerAddr
-                                + " is reachable from the generator and port " + grpcPort + " is open. journal tail:\n"
-                                + truncate(journal, 3000));
+                        "Agent did not register within timeout via SSH reverse tunnel "
+                                + controllerAddr + ". journal tail:\n" + truncate(journal, 3000));
                 throw new ApiException(HttpStatus.GATEWAY_TIMEOUT,
-                        "Agent started but did not register with controller at " + controllerAddr
-                                + " within " + props.getAgentRegisterWaitSeconds()
-                                + "s. Ensure generators can reach that host:port (gRPC). See generator logs for journalctl.");
+                        "Agent started but did not register within "
+                                + props.getAgentRegisterWaitSeconds()
+                                + "s (SSH reverse tunnel " + controllerAddr
+                                + "). See generator diagnostic logs / journalctl.");
             }
 
             runStep(g, "VERIFY", "Agent registered; generator AVAILABLE");
             genLogs.info(generatorId, "PROVISION", "VERIFY",
                     "Provisioning complete — agent connected and generator is AVAILABLE");
+            keepTunnel = true; // keep reverse tunnel so the agent session stays up
         } catch (Exception e) {
             genLogs.error(generatorId, "PROVISION", "FAILED", e.getMessage());
             throw e;
+        } finally {
+            if (!keepTunnel) {
+                tunnels.close(generatorId);
+            }
         }
     }
 

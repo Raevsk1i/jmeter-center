@@ -12,6 +12,7 @@ import com.ltplatform.generator.dto.GeneratorDtos.UpdateGeneratorRequest;
 import com.ltplatform.generator.repo.GeneratorRepository;
 import com.ltplatform.generator.repo.SshCredentialRepository;
 import com.ltplatform.provisioning.service.ProvisioningService;
+import com.ltplatform.provisioning.ssh.SshAgentTunnelService;
 import com.ltplatform.provisioning.ssh.SshClientFactory;
 import com.ltplatform.security.audit.AuditService;
 import com.ltplatform.security.crypto.SecretBox;
@@ -32,19 +33,22 @@ public class GeneratorService {
     private final SecretBox secretBox;
     private final ProvisioningService provisioning;
     private final AuditService audit;
+    private final SshAgentTunnelService tunnels;
 
     public GeneratorService(
             GeneratorRepository generators,
             SshCredentialRepository credentials,
             SecretBox secretBox,
             ProvisioningService provisioning,
-            AuditService audit
+            AuditService audit,
+            SshAgentTunnelService tunnels
     ) {
         this.generators = generators;
         this.credentials = credentials;
         this.secretBox = secretBox;
         this.provisioning = provisioning;
         this.audit = audit;
+        this.tunnels = tunnels;
     }
 
     @Transactional
@@ -119,6 +123,7 @@ public class GeneratorService {
         if (g.getStatus() == GeneratorStatus.RUNNING || g.getStatus() == GeneratorStatus.RESERVED) {
             throw new ApiException(HttpStatus.CONFLICT, "Cannot delete reserved/running generator");
         }
+        tunnels.close(id);
         generators.delete(g);
         audit.record(actor, "GENERATOR_DELETE", "Generator", id.toString(), Map.of());
     }
