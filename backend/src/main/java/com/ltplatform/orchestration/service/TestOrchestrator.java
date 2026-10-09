@@ -199,9 +199,18 @@ public class TestOrchestrator {
         events.emit(runId, null, "TestRun", runId.toString(), "RESERVED",
                 "Generators reserved: master=" + shortId(masterId) + " slaves=" + slaves.size(),
                 Map.of("count", reserved.size(), "masterGeneratorId", masterId.toString(),
-                        "slaveGeneratorIds", slaves.stream().map(UUID::toString).toList()));
+                        "slaveGeneratorIds", slaves.stream().map(UUID::toString).toList(),
+                        "fencingTokens", reserved.stream()
+                                .collect(java.util.stream.Collectors.toMap(
+                                        r -> r.generatorId().toString(),
+                                        ReservationResult::fencingToken,
+                                        (a, b) -> a,
+                                        LinkedHashMap::new))));
         orchLog(masterId, runId, "RESERVED",
-                "Reserved master + " + slaves.size() + " slave(s) for run");
+                "Reserved master + " + slaves.size() + " slave(s) for run; fencing="
+                        + reserved.stream()
+                        .map(r -> shortId(r.generatorId()) + "→" + r.fencingToken())
+                        .toList());
 
         TestDefinition def = tests.requireTest(run.getTestDefinitionId());
         SystemEntity system = tests.requireSystem(def.getSystemId());

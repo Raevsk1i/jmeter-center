@@ -27,6 +27,26 @@ public class AgentSessionRegistry {
         }
     }
 
+    /**
+     * Drop the live session so the agent reconnects and re-adopts the controller fencing token.
+     * Used when the agent's persisted token is ahead of the controller (e.g. after DB reset).
+     */
+    public void disconnect(UUID generatorId) {
+        AgentSession session = byGenerator.remove(generatorId);
+        if (session == null) {
+            return;
+        }
+        try {
+            session.outbound().onCompleted();
+        } catch (Exception ignored) {
+            try {
+                session.outbound().onError(new IllegalStateException("fencing resync"));
+            } catch (Exception ignored2) {
+                // stream already closed
+            }
+        }
+    }
+
     public void touch(UUID generatorId) {
         AgentSession s = byGenerator.get(generatorId);
         if (s != null) {
