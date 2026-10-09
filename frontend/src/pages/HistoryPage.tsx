@@ -42,12 +42,46 @@ export function HistoryPage() {
         {selected.errorMessage && <Alert severity="error">{selected.errorMessage}</Alert>}
         <Box sx={{ p: 2, borderRadius: 2, border: '1px solid', borderColor: 'divider', bgcolor: 'background.paper' }}>
           <Typography variant="h6" gutterBottom>Events</Typography>
-          <Stack spacing={1}>
-            {events.map((e, i) => (
-              <Typography key={i} variant="body2">
-                <strong>{String(e.eventType || e.event_type)}</strong> — {String(e.message || '')}
-              </Typography>
-            ))}
+          <Stack spacing={1.25}>
+            {events.map((e, i) => {
+              const detail = (e.detail && typeof e.detail === 'object')
+                ? e.detail as Record<string, unknown>
+                : null;
+              const tail = typeof detail?.jmeterLogTail === 'string' ? detail.jmeterLogTail as string
+                : typeof detail?.consoleLogTail === 'string' ? detail.consoleLogTail as string
+                  : '';
+              return (
+                <Box key={i} sx={{ pb: 1, borderBottom: '1px solid', borderColor: 'divider' }}>
+                  <Typography variant="caption" color="text.secondary">
+                    {e.at ? new Date(String(e.at)).toLocaleString() : ''}
+                    {e.generatorId ? ` · ${String(e.generatorId).slice(0, 8)}` : ''}
+                  </Typography>
+                  <Typography variant="body2">
+                    <strong>{String(e.eventType || e.event_type)}</strong> — {String(e.message || '')}
+                  </Typography>
+                  {detail && (detail.exitCode != null || detail.jtlSamples != null || detail.pid != null) && (
+                    <Typography variant="caption" sx={{ fontFamily: 'IBM Plex Mono, monospace' }} display="block">
+                      {[
+                        detail.pid != null ? `pid=${detail.pid}` : '',
+                        detail.state != null ? `state=${detail.state}` : '',
+                        detail.exitCode != null ? `exit=${detail.exitCode}` : '',
+                        detail.jtlSamples != null ? `jtlSamples=${detail.jtlSamples}` : '',
+                        detail.jtlBytes != null ? `jtlBytes=${detail.jtlBytes}` : '',
+                      ].filter(Boolean).join(' · ')}
+                    </Typography>
+                  )}
+                  {tail && (
+                    <Box sx={{
+                      mt: 0.75, p: 1, borderRadius: 1, bgcolor: 'rgba(0,0,0,0.28)',
+                      fontFamily: 'IBM Plex Mono, monospace', fontSize: 11,
+                      maxHeight: 140, overflow: 'auto', whiteSpace: 'pre-wrap',
+                    }}>
+                      {tail.slice(-2000)}
+                    </Box>
+                  )}
+                </Box>
+              );
+            })}
             {events.length === 0 && <Typography color="text.secondary">No events</Typography>}
           </Stack>
         </Box>

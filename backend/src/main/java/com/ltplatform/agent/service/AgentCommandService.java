@@ -41,8 +41,16 @@ public class AgentCommandService {
 
     public CommandOutcome syncArtifacts(UUID generatorId, String runId, long fencingToken, String workspace,
                                         List<ArtifactFile> files) {
+        List<String> names = files.stream().map(ArtifactFile::getRelativePath).toList();
+        long totalBytes = files.stream().mapToLong(f -> f.getContent().size()).sum();
         return send(generatorId, runId, fencingToken, "SyncArtifacts", b -> b.setSyncArtifacts(
-                SyncArtifactsCmd.newBuilder().setWorkspacePath(workspace).addAllFiles(files).build()), 120);
+                SyncArtifactsCmd.newBuilder().setWorkspacePath(workspace).addAllFiles(files).build()), 120,
+                Map.of(
+                        "workspace", workspace,
+                        "fileCount", files.size(),
+                        "totalBytes", totalBytes,
+                        "files", names
+                ));
     }
 
     public CommandOutcome verifyEnvironment(UUID generatorId, String runId, long fencingToken) {
@@ -58,11 +66,19 @@ public class AgentCommandService {
                         .setRmiPort(rmiPort)
                         .setLocalPort(localPort)
                         .addAllExtraClasspath(classpath)
-                        .build()), 120);
+                        .build()), 120,
+                Map.of("workspace", workspace, "rmiPort", rmiPort, "localPort", localPort));
     }
 
     public CommandOutcome startTest(UUID generatorId, String runId, long fencingToken, String workspace,
                                     String jmxPath, List<String> remoteHosts, Map<String, String> properties, int rmiPort) {
+        Map<String, Object> extra = new LinkedHashMap<>();
+        extra.put("workspace", workspace);
+        extra.put("jmxPath", jmxPath);
+        extra.put("remoteHosts", remoteHosts);
+        extra.put("propertyCount", properties != null ? properties.size() : 0);
+        extra.put("properties", properties != null ? properties : Map.of());
+        extra.put("rmiPort", rmiPort);
         return send(generatorId, runId, fencingToken, "StartJMeterTest", b -> b.setStartJmeterTest(
                 StartJMeterTestCmd.newBuilder()
                         .setWorkspacePath(workspace)
@@ -70,7 +86,7 @@ public class AgentCommandService {
                         .addAllRemoteHosts(remoteHosts)
                         .putAllProperties(properties)
                         .setRmiPort(rmiPort)
-                        .build()), 120);
+                        .build()), 120, extra);
     }
 
     public CommandOutcome stop(UUID generatorId, String runId, long fencingToken, boolean force) {
@@ -93,6 +109,11 @@ public class AgentCommandService {
     }
 
     public void requestLogStream(UUID generatorId, String runId, long fencingToken, long fromOffset) {
+        requestLogStream(generatorId, runId, fencingToken, fromOffset, "jmeter.log");
+    }
+
+    public void requestLogStream(UUID generatorId, String runId, long fencingToken, long fromOffset, String logFile) {
+        String file = logFile == null || logFile.isBlank() ? "jmeter.log" : logFile;
         String commandId = UUID.randomUUID().toString();
         CommandEnvelope envelope = CommandEnvelope.newBuilder()
                 .setCommandId(commandId)
@@ -102,11 +123,12 @@ public class AgentCommandService {
                 .setStreamLogs(StreamLogsCmd.newBuilder()
                         .setRunId(runId)
                         .setFromOffset(fromOffset)
-                        .setLogFile("jmeter.log")
+                        .setLogFile(file)
                         .build())
                 .build();
-        genLogs.info(generatorId, "AGENT_CMD", "StreamLogs",
-                "→ StreamLogs commandId=" + commandId + " runId=" + runId);
+        genLogs.append(generatorId, "AGENT_CMD", "INFO", "StreamLogs",
+                "→ StreamLogs commandId=" + shortId(commandId) + " runId=" + shortId(runId) + " file=" + file,
+                Map.of("commandId", commandId, "runId", runId, "logFile", file, "fromOffset", fromOffset));
         sessions.send(generatorId, ControllerMessage.newBuilder().setCommand(envelope).build());
     }
 
@@ -120,6 +142,12 @@ public class AgentCommandService {
 
     private CommandOutcome send(UUID generatorId, String runId, long fencingToken, String commandName,
                                 Consumer<CommandEnvelope.Builder> configurator, long timeout) {
+        return send(generatorId, runId, fencingToken, commandName, configurator, timeout, Map.of());
+    }
+
+    private CommandOutcome send(UUID generatorId, String runId, long fencingToken, String commandName,
+                                Consumer<CommandEnvelope.Builder> configurator, long timeout,
+                                Map<String, Object> extraDetail) {
         String commandId = UUID.randomUUID().toString();
         CommandEnvelope.Builder builder = CommandEnvelope.newBuilder()
                 .setCommandId(commandId)
@@ -135,6 +163,9 @@ public class AgentCommandService {
         sentDetail.put("fencingToken", fencingToken);
         sentDetail.put("timeoutSec", timeout);
         sentDetail.put("commandCase", envelope.getCommandCase().name());
+        if (extraDetail != null) {
+            sentDetail.putAll(extraDetail);
+        }
 
         if (!sessions.isOnline(generatorId)) {
             genLogs.error(generatorId, "AGENT_CMD", commandName,
@@ -142,10 +173,12 @@ public class AgentCommandService {
             return new CommandOutcome(false, "Agent offline for generator " + generatorId, Map.of());
         }
 
+        String summaryExtra = summarizeExtra(commandName, extraDetail);
         genLogs.append(generatorId, "AGENT_CMD", "INFO", commandName,
                 "→ " + commandName + " commandId=" + shortId(commandId)
                         + (runId != null && !runId.isBlank() ? " runId=" + shortId(runId) : "")
-                        + " fencing=" + fencingToken,
+                        + " fencing=" + fencingToken
+                        + summaryExtra,
                 sentDetail);
 
         CompletableFuture<CommandOutcome> future = sessions.awaitResult(commandId, timeout);
@@ -161,11 +194,14 @@ public class AgentCommandService {
             Map<String, Object> resultDetail = new LinkedHashMap<>();
             resultDetail.put("commandId", commandId);
             resultDetail.put("success", outcome.success());
+            resultDetail.put("message", outcome.message());
             resultDetail.put("attributes", outcome.attributes());
+            String attrSummary = summarizeAttributes(outcome.attributes());
             genLogs.append(generatorId, "AGENT_CMD", outcome.success() ? "INFO" : "ERROR", commandName + "_RESULT",
                     (outcome.success() ? "← OK " : "← FAIL ") + commandName
                             + (outcome.message() != null && !outcome.message().isBlank()
-                            ? ": " + truncate(outcome.message(), 400) : ""),
+                            ? ": " + truncate(outcome.message(), 400) : "")
+                            + attrSummary,
                     resultDetail);
             return outcome;
         } catch (Exception e) {
@@ -173,6 +209,33 @@ public class AgentCommandService {
                     "← TIMEOUT/ERROR " + commandName + ": " + e.getMessage());
             return new CommandOutcome(false, e.getMessage(), Map.of());
         }
+    }
+
+    private static String summarizeExtra(String commandName, Map<String, Object> extra) {
+        if (extra == null || extra.isEmpty()) return "";
+        return switch (commandName) {
+            case "SyncArtifacts" -> " files=" + extra.getOrDefault("fileCount", "?")
+                    + " bytes=" + extra.getOrDefault("totalBytes", "?");
+            case "StartJMeterTest" -> " jmx=" + extra.getOrDefault("jmxPath", "?")
+                    + " remotes=" + extra.getOrDefault("remoteHosts", List.of());
+            case "StartJMeterServer" -> " rmi=" + extra.getOrDefault("rmiPort", "?");
+            default -> "";
+        };
+    }
+
+    private static String summarizeAttributes(Map<String, String> attrs) {
+        if (attrs == null || attrs.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (String key : List.of("pid", "state", "exitCode", "jtlSamples", "jtlBytes", "jmxPath", "workspace", "argv")) {
+            if (attrs.containsKey(key) && attrs.get(key) != null && !attrs.get(key).isBlank()) {
+                String val = attrs.get(key);
+                if ("argv".equals(key) || val.length() > 120) {
+                    val = truncate(val, 120);
+                }
+                sb.append(' ').append(key).append('=').append(val);
+            }
+        }
+        return sb.toString();
     }
 
     private static String shortId(String id) {
