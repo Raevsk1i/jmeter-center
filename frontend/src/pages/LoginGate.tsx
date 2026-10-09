@@ -1,11 +1,8 @@
-import { useEffect } from 'react';
 import { setBasicAuth } from '../api/client';
 
-/** Applies default admin basic auth for local MVP convenience. */
+/** Applies default admin basic auth for local MVP convenience (sync so first queries are authenticated). */
 export function useDefaultAuth() {
-  useEffect(() => {
-    if (!sessionStorage.getItem('basicAuth')) {
-      setBasicAuth('admin', 'admin');
-    }
-  }, []);
+  if (typeof sessionStorage !== 'undefined' && !sessionStorage.getItem('basicAuth')) {
+    setBasicAuth('admin', 'admin');
+  }
 }
