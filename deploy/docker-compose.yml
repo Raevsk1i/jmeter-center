@@ -1,0 +1,75 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ltplatform
+      POSTGRES_USER: ltplatform
+      POSTGRES_PASSWORD: ltplatform
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ltplatform -d ltplatform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  controller:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.controller
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ltplatform
+      DB_USER: ltplatform
+      DB_PASSWORD: ltplatform
+      LT_MASTER_KEY: 0123456789abcdef0123456789abcdef
+      LT_ARTIFACT_ROOT: /data/artifacts
+      LT_LOG_ROOT: /data/logs
+      LT_JMETER_BUNDLE: /data/jmeter
+      LT_AGENT_BINARY: /data/agent/lt-agent
+      LT_CERTS_DIR: /data/certs
+      LT_GRPC_PORT: 9090
+      LT_CONTROLLER_HOST: controller
+      LT_ADMIN_PASSWORD: admin
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    volumes:
+      - controller-data:/data
+      - ./lt-agent:/data/agent/lt-agent:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: ../deploy/Dockerfile.frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - controller
+
+  # Example agent container for local E2E (connects outbound to controller:9090)
+  agent-master:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.agent
+    environment:
+      LT_CONTROLLER: controller:9090
+      LT_GENERATOR_ID: ${DEMO_MASTER_GENERATOR_ID:-00000000-0000-0000-0000-000000000001}
+      LT_AGENT_ID: agent-master
+      LT_BOOTSTRAP_TOKEN: demo
+      LT_WORK_ROOT: /var/lib/lt-agent/workspaces
+      LT_STATE_DIR: /var/lib/lt-agent/state
+      LT_JMETER_HOME: /opt/lt-jmeter
+    depends_on:
+      - controller
+    profiles: ["e2e"]
+
+volumes:
+  pgdata:
+  controller-data:

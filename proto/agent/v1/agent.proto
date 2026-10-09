@@ -1,0 +1,174 @@
+syntax = "proto3";
+
+package ltplatform.agent.v1;
+
+option java_multiple_files = true;
+option java_package = "com.ltplatform.agent.v1";
+option go_package = "github.com/ltplatform/agent/api/v1;agentv1";
+
+service AgentControl {
+  // Agent-initiated bidirectional session. Controller pushes commands;
+  // agent pushes heartbeats, statuses, logs, and command results.
+  rpc AgentSession(stream AgentMessage) returns (stream ControllerMessage);
+}
+
+message AgentMessage {
+  oneof payload {
+    RegisterRequest register = 1;
+    Heartbeat heartbeat = 2;
+    CommandResult command_result = 3;
+    LogChunk log_chunk = 4;
+    ExecutionStatusReport execution_status = 5;
+    SystemMetricsReport metrics = 6;
+  }
+}
+
+message ControllerMessage {
+  oneof payload {
+    RegisterResponse register_response = 1;
+    CommandEnvelope command = 2;
+  }
+}
+
+message RegisterRequest {
+  string agent_id = 1;
+  string hostname = 2;
+  string bootstrap_token = 3;
+  string agent_version = 4;
+  string java_version = 5;
+  string jmeter_version = 6;
+  string generator_id = 7;
+}
+
+message RegisterResponse {
+  bool accepted = 1;
+  string message = 2;
+  string session_id = 3;
+  bytes client_cert_pem = 4;
+  bytes client_key_pem = 5;
+  int64 fencing_token = 6;
+}
+
+message Heartbeat {
+  string agent_id = 1;
+  string session_id = 2;
+  double cpu_usage_percent = 3;
+  int64 ram_used_mb = 4;
+  int64 ram_total_mb = 5;
+  int64 disk_free_mb = 6;
+  string status = 7;
+  optional string active_run_id = 8;
+}
+
+message CommandEnvelope {
+  string command_id = 1;
+  string run_id = 2;
+  string generator_id = 3;
+  int64 fencing_token = 4;
+  oneof command {
+    GetAgentStatusCmd get_agent_status = 10;
+    GetSystemMetricsCmd get_system_metrics = 11;
+    PrepareWorkspaceCmd prepare_workspace = 12;
+    SyncArtifactsCmd sync_artifacts = 13;
+    VerifyEnvironmentCmd verify_environment = 14;
+    StartJMeterServerCmd start_jmeter_server = 15;
+    StartJMeterTestCmd start_jmeter_test = 16;
+    StopJMeterCmd stop_jmeter = 17;
+    GetExecutionStatusCmd get_execution_status = 18;
+    StreamLogsCmd stream_logs = 19;
+    CleanupExecutionCmd cleanup_execution = 20;
+  }
+}
+
+message GetAgentStatusCmd {}
+message GetSystemMetricsCmd {}
+
+message PrepareWorkspaceCmd {
+  string workspace_path = 1;
+}
+
+message ArtifactFile {
+  string relative_path = 1;
+  string sha256 = 2;
+  bytes content = 3;
+}
+
+message SyncArtifactsCmd {
+  repeated ArtifactFile files = 1;
+  string workspace_path = 2;
+}
+
+message VerifyEnvironmentCmd {
+  string expected_java = 1;
+  string expected_jmeter = 2;
+}
+
+message StartJMeterServerCmd {
+  int32 rmi_port = 1;
+  int32 local_port = 2;
+  string workspace_path = 3;
+  repeated string extra_classpath = 4;
+}
+
+message StartJMeterTestCmd {
+  string jmx_path = 1;
+  string workspace_path = 2;
+  repeated string remote_hosts = 3;
+  map<string, string> properties = 4;
+  int32 rmi_port = 5;
+}
+
+message StopJMeterCmd {
+  bool force = 1;
+}
+
+message GetExecutionStatusCmd {
+  string run_id = 1;
+}
+
+message StreamLogsCmd {
+  string run_id = 1;
+  int64 from_offset = 2;
+  string log_file = 3;
+}
+
+message CleanupExecutionCmd {
+  string run_id = 1;
+  string workspace_path = 2;
+  bool keep_results = 3;
+}
+
+message CommandResult {
+  string command_id = 1;
+  string run_id = 2;
+  bool success = 3;
+  string message = 4;
+  map<string, string> attributes = 5;
+}
+
+message LogChunk {
+  string run_id = 1;
+  string generator_id = 2;
+  string log_file = 3;
+  int64 offset = 4;
+  bytes data = 5;
+  bool eof = 6;
+}
+
+message ExecutionStatusReport {
+  string run_id = 1;
+  string state = 2;
+  int32 jmeter_pid = 3;
+  bool jmeter_alive = 4;
+  string role = 5;
+}
+
+message SystemMetricsReport {
+  double cpu_usage_percent = 1;
+  int64 ram_used_mb = 2;
+  int64 ram_total_mb = 3;
+  int64 disk_free_mb = 4;
+  string java_version = 5;
+  string jmeter_version = 6;
+  string agent_version = 7;
+}

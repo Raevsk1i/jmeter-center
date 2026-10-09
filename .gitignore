@@ -1,24 +1,38 @@
-# Compiled class file
+# Compiled
 *.class
-
-# Log file
-*.log
-
-# BlueJ files
-*.ctxt
-
-# Mobile Tools for Java (J2ME)
-.mtj.tmp/
-
-# Package Files #
 *.jar
 *.war
-*.nar
 *.ear
-*.zip
-*.tar.gz
-*.rar
-
-# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
+
+# Logs
+*.log
+
+# Build
+backend/.gradle/
+backend/build/
+backend/bin/
+frontend/node_modules/
+frontend/dist/
+agent/bin/
+**/__pycache__/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# Local data / secrets
+data/
+deploy/certs/*.key
+deploy/certs/*.crt
+.env
+*.pem
+
+# OS
+.DS_Store
+
+# Agent binary artifact (rebuilt in CI)
+deploy/lt-agent
