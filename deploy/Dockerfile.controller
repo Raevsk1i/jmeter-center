@@ -1,3 +1,9 @@
+FROM golang:1.22-bookworm AS agent-build
+WORKDIR /src
+COPY agent /src/agent
+WORKDIR /src/agent
+RUN go build -o /lt-agent ./cmd/agent
+
 FROM eclipse-temurin:21-jdk-jammy AS build
 WORKDIR /src
 COPY backend /src/backend
@@ -11,6 +17,8 @@ RUN apt-get update && apt-get install -y unzip curl && \
 FROM eclipse-temurin:21-jre-jammy
 WORKDIR /app
 COPY --from=build /src/backend/build/libs/lt-controller.jar /app/lt-controller.jar
-RUN mkdir -p /data/artifacts /data/logs /data/certs /data/jmeter /data/agent
+COPY --from=agent-build /lt-agent /data/agent/lt-agent
+RUN mkdir -p /data/artifacts /data/logs /data/certs /data/jmeter /data/agent && \
+    chmod +x /data/agent/lt-agent
 EXPOSE 8080 9090
 ENTRYPOINT ["java", "-jar", "/app/lt-controller.jar"]
